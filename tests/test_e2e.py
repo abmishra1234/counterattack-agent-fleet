@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from counterstrike.cli import main
 from counterstrike.evaluate import evaluate, gate
 from counterstrike.graph import run
@@ -66,6 +68,8 @@ def test_cli_gate_fails_on_wrong_gold(tmp_path, data_dir, gold):
 
 def test_generalises_to_hidden_fixture_set(tmp_path, data_dir):
     hidden = data_dir.parent / "grading" / "hidden_data"
+    if not hidden.is_dir():
+        pytest.skip("trainer-only hidden fixtures are not present in this checkout")
     run(hidden, tmp_path, FakeLLM())
     metrics = evaluate(tmp_path, hidden / "gold" / "expected_alerts.json")
     assert gate(metrics, 1.0, 1.0, 1.0) == []
