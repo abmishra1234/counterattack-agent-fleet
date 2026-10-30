@@ -68,7 +68,14 @@ def test_cli_gate_fails_on_wrong_gold(tmp_path, data_dir, gold):
 
 def test_generalises_to_hidden_fixture_set(tmp_path, data_dir):
     hidden = data_dir.parent / "grading" / "hidden_data"
-    if not hidden.is_dir():
+    required = (
+        hidden / "advisories.json",
+        hidden / "inventory.json",
+        hidden / "kev.json",
+        hidden / "aliases.json",
+        hidden / "gold" / "expected_alerts.json",
+    )
+    if not all(path.is_file() for path in required):
         pytest.skip("trainer-only hidden fixtures are not present in this checkout")
     run(hidden, tmp_path, FakeLLM())
     metrics = evaluate(tmp_path, hidden / "gold" / "expected_alerts.json")
