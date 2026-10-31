@@ -44,12 +44,17 @@ def ingest_agent(
         source_trace.extend(bundle.trace)
         source_syncs.extend(bundle.source_syncs)
         source_enrichments.extend(bundle.enrichments)
+        kev_complete = any(
+            item.get("source_id") == "cisa_kev" and item.get("status") == "success"
+            for item in source_syncs
+        )
         if not any(item.get("status") in {"success", "partial"} for item in source_syncs):
             raise RuntimeError("public_feeds_unavailable")
     else:
         feed_batch = FixtureFeedAdapter(data).fetch()
         advisories = list(feed_batch.advisories)
         kev = list(_load(data / "kev.json")["cve_ids"])
+        kev_complete = True
         source_trace.append(
             {
                 "agent": "ingest",
@@ -78,6 +83,7 @@ def ingest_agent(
         "advisories": unique,
         "inventory": inventory,
         "kev": kev,
+        "kev_complete": kev_complete,
         "aliases": aliases,
         "source_syncs": source_syncs,
         "source_enrichments": source_enrichments,

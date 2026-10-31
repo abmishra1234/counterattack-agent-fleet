@@ -208,7 +208,7 @@ class MatchRecord(Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"))
     advisory_id: Mapped[str] = mapped_column(ForeignKey("advisories.id"), nullable=False)
     inventory_asset_id: Mapped[str] = mapped_column(
         ForeignKey("inventory_assets.id"), nullable=False
@@ -460,10 +460,11 @@ class OutboxMessage(Base):
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_outbox_idempotency_key"),
         Index("ix_outbox_status_next_attempt", "status", "next_attempt_at"),
+        Index("ix_outbox_delivery_lease", "status", "delivery_lease_expires_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False)
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"))
     alert_id: Mapped[str | None] = mapped_column(ForeignKey("alerts.id"))
     channel: Mapped[str] = mapped_column(String(32), nullable=False)
     recipient_ref: Mapped[str] = mapped_column(String(320), nullable=False)
@@ -473,6 +474,9 @@ class OutboxMessage(Base):
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="queued")
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivery_worker_id: Mapped[str | None] = mapped_column(String(200))
+    delivery_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    delivery_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_response_code: Mapped[str | None] = mapped_column(String(80))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

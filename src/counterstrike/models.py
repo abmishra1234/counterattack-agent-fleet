@@ -36,7 +36,7 @@ class ExtractedAdvisory(BaseModel):
     advisory_id: str
     title: str
     cvss: float
-    in_kev: bool = False
+    in_kev: bool | None = False
     products: list[AffectedProduct]
     method: Literal["structured", "llm"]
     evidence: list[str] = Field(default_factory=list)
@@ -173,6 +173,7 @@ class FleetState(TypedDict, total=False):
     out_dir: str
     advisories: list[Advisory]
     kev: list[str]
+    kev_complete: bool
     inventory: list[Asset]
     aliases: dict[str, str]
     source_syncs: list[dict[str, Any]]

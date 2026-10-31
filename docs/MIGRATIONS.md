@@ -25,6 +25,16 @@ already been purged. Removing `purged_at` in that state would hide a durable
 erasure and cause content reads to treat a purged record like a decryptable
 artifact.
 
+Revision `0006_outbox_delivery_lease` refuses to downgrade while any outbox row
+is actively delivering. Stop delivery workers and resolve or expire active
+leases before using a disposable local downgrade.
+
+Revision `0007_outbox_daily_digest` makes `outbox_messages.run_id` nullable so a
+digest can represent a time window spanning multiple runs. It refuses to
+downgrade while any run-less outbox message exists; archive or remove those
+digest rows before a disposable local downgrade. Production recovery remains
+forward-only regardless of whether these guards permit a local downgrade.
+
 ## Production recovery
 
 Production schema changes are forward-only. Deploy a compatible application

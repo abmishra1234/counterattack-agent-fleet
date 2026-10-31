@@ -257,9 +257,17 @@ def persist_run_results(
             )
         )
         enriched = extracted.get(advisory.id)
+        kev_value = (
+            enriched.in_kev
+            if enriched is not None
+            else (advisory.id in kev_ids) if state.get("kev_complete", True) else None
+        )
         normalized_payload = {
             **payload,
-            "in_kev": advisory.id in kev_ids,
+            "in_kev": kev_value,
+            "kev_status": (
+                "listed" if kev_value is True else "not_listed" if kev_value is False else "unknown"
+            ),
             "extraction": _json(enriched) if enriched else None,
         }
         if record is None:
@@ -492,8 +500,8 @@ def _enqueue_alert_delivery(
 ) -> None:
     """Persist one stable delivery intent in the run-results transaction."""
     channel = settings.outbox_channel
-    recipient_ref = settings.outbox_recipient_refs.get(alert.owner)
-    if channel is None or recipient_ref is None:
+    owner_recipient_ref = settings.outbox_recipient_refs.get(alert.owner)
+    if channel is None or owner_recipient_ref is None:
         raise ValueError("delivery_recipient_not_configured")
     payload = {
         "run_id": run.id,
@@ -514,12 +522,6 @@ def _enqueue_alert_delivery(
         "evidence": alert.evidence,
         "source_references": alert.source_references,
     }
-    encoded_payload = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
-    payload_hash = hashlib.sha256(encoded_payload).hexdigest()
-    identity = f"{run.id}:{alert.alert_key}:{channel}:{recipient_ref}".encode()
-    idempotency_key = hashlib.sha256(identity).hexdigest()
     dialect = session.bind.dialect.name if session.bind is not None else ""
     insert = (
         postgresql_insert
@@ -530,42 +532,64 @@ def _enqueue_alert_delivery(
     )
     if insert is None:
         raise RuntimeError("Delivery outbox requires PostgreSQL or SQLite")
-    proposed_outbox_id = str(uuid4())
-    result = session.execute(
-        insert(OutboxMessage)
-        .values(
-            id=proposed_outbox_id,
-            run_id=run.id,
-            alert_id=alert.id,
-            channel=channel,
-            recipient_ref=recipient_ref,
-            idempotency_key=idempotency_key,
-            payload=payload,
-            payload_hash=payload_hash,
-            status="queued",
-            attempt=0,
+    targets = [("owner", owner_recipient_ref)]
+    if alert.priority in {"P1", "P2"}:
+        security_recipient_ref = settings.outbox_security_recipient_ref
+        if not security_recipient_ref:
+            raise ValueError("security_recipient_not_configured_for_priority_alert")
+        security_recipient = security_recipient_ref.get_secret_value()
+        if channel == "email" and security_recipient == owner_recipient_ref:
+            targets[0] = ("owner_security", owner_recipient_ref)
+        else:
+            targets.append(("security", security_recipient))
+    for route, recipient_ref in targets:
+        routed_payload = {**payload, "delivery_route": route}
+        routed_hash = hashlib.sha256(
+            json.dumps(
+                routed_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")
+        ).hexdigest()
+        identity = f"{run.id}:{alert.alert_key}:{channel}:{route}:{recipient_ref}".encode()
+        idempotency_key = hashlib.sha256(identity).hexdigest()
+        proposed_outbox_id = str(uuid4())
+        result = session.execute(
+            insert(OutboxMessage)
+            .values(
+                id=proposed_outbox_id,
+                run_id=run.id,
+                alert_id=alert.id,
+                channel=channel,
+                recipient_ref=recipient_ref,
+                idempotency_key=idempotency_key,
+                payload=routed_payload,
+                payload_hash=routed_hash,
+                status="queued",
+                attempt=0,
+            )
+            .on_conflict_do_nothing(index_elements=[OutboxMessage.idempotency_key])
+            .returning(OutboxMessage.id)
         )
-        .on_conflict_do_nothing(index_elements=[OutboxMessage.idempotency_key])
-        .returning(OutboxMessage.id)
-    )
-    outbox_id = result.scalar_one_or_none()
-    if outbox_id is not None:
-        append_event(
-            session,
-            actor_type="service",
-            actor_id="delivery-outbox",
-            action="delivery_enqueued",
-            event_type="delivery.outbox.enqueued",
-            outcome="success",
-            resource_type="outbox_message",
-            resource_id=outbox_id,
-            request_id=run.request_id,
-            run_id=run.id,
-            alert_id=alert.id,
-            safe_details={
-                "channel": channel,
-                "idempotency_key": idempotency_key,
-                "payload_hash": payload_hash,
-                "recipient_hash": hashlib.sha256(recipient_ref.encode("utf-8")).hexdigest()[:16],
-            },
-        )
+        outbox_id = result.scalar_one_or_none()
+        if outbox_id is not None:
+            append_event(
+                session,
+                actor_type="service",
+                actor_id="delivery-outbox",
+                action="delivery_enqueued",
+                event_type="delivery.outbox.enqueued",
+                outcome="success",
+                resource_type="outbox_message",
+                resource_id=outbox_id,
+                request_id=run.request_id,
+                run_id=run.id,
+                alert_id=alert.id,
+                safe_details={
+                    "channel": channel,
+                    "route": route,
+                    "idempotency_key": idempotency_key,
+                    "payload_hash": routed_hash,
+                    "recipient_hash": hashlib.sha256(recipient_ref.encode("utf-8")).hexdigest()[
+                        :16
+                    ],
+                },
+            )

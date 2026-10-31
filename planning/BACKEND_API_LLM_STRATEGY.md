@@ -32,7 +32,7 @@ This proposal covers the Must gaps summarized in [the updated requirement gap pl
 - The fleet remains advisory and read-only with respect to target assets. No patching, configuration changes, or shell/SSH execution is introduced.
 - Model keys, prompts containing sensitive values, and raw authorization headers are never returned by an API or written to run/audit logs.
 - The initial API is an internal/demo service. Public internet exposure and multi-tenant authorization are out of scope until identity, role, and network requirements are approved.
-- Teams/email delivery can be implemented behind a durable outbox and disabled by default. Actual external sends require configured destinations and explicit deployment enablement.
+- Teams Workflows webhook and SMTP STARTTLS adapters process the durable outbox behind `OUTBOX_DELIVERY_ENABLED=false`; P1/P2 routes separately enqueue owner and security messages. Delivery attempts are audited and exposed through a filtered, recipient-redacted API. Actual sends require approved recipients/destinations and explicit deployment enablement. See `docs/DELIVERY.md`.
 - Ticket creation, vendor scraping, and feedback-based model training remain outside the initial backend slice unless the requirement owner re-scopes them.
 
 ## 3. Proposed technology decisions
@@ -137,7 +137,7 @@ All paths below are under `/api/v1`. JSON timestamps use UTC ISO 8601. Collectio
 | `llm_call` | call ID, run/job/request IDs, task, provider/model/deployment, prompt version, attempt, start/end, outcome, latency, input/output/total tokens, pricing key/version, estimated cost/currency, safe error class | Attribute every LLM attempt and its cost/usage to the task and run; retain failed calls and retries. No prompt or completion body is stored. |
 | `llm_exchange_artifact` | artifact ID, call ID, kind (`request`, `response`, `provider_error`), encrypted canonical payload, plaintext SHA-256, key/version reference, capture time, retention deadline, purge time | Preserve the exact system prompt, user prompt/query, serialized context/messages and model parameters, plus raw response or sanitized provider error for audit/replay. Isolated from general logs and access-controlled; expiry erases ciphertext while retaining hash/tombstone metadata and a chained purge event. |
 | `llm_audit_access` | access event ID/time, actor, call/artifact IDs, purpose/reason, request ID, outcome | Audit every view/export of prompt or response content and support review of sensitive audit access. |
-| `outbox_message` | event key, channel, recipient reference, payload hash, status, attempts, next retry, provider response code | Future Teams/email delivery with idempotency and dead-letter visibility. |
+| `outbox_message` | event key, channel, recipient reference, payload hash, status, attempts, next retry, delivery worker/lease, provider response code | Durable Teams Workflows/SMTP delivery; unknown outcomes are not automatically retried. |
 
 Persist an inventory snapshot/version with each run. A later inventory change must not silently rewrite the facts behind an old alert. Keep `out/` JSON exports for CLI/eval compatibility and optionally produce a run export from persisted records.
 
@@ -281,7 +281,7 @@ EPSS source approval and EPSS risk-scoring approval are separate gates. Scoring 
 4. Normalize identifiers and upsert advisories/enrichment idempotently. Save checkpoint only after successfully processing the corresponding page/window.
 5. A run is marked `partial` if a required source fails but the remaining work completes; status retains per-source evidence and safe failure categories.
 6. After ingestion and enrichment, invoke the existing deterministic LangGraph stages. Persist results transactionally by run; write audit events for stage decisions and include the policy/prompt versions.
-7. Worker commits an outbox record for each intended delivery; a separate delivery loop sends only when a channel is enabled. Repeated jobs reuse stable idempotency keys.
+7. Worker commits an outbox record for each intended delivery; a separate delivery loop sends only when delivery is explicitly enabled. P1/P2 rows include owner and security routes. Repeated jobs reuse stable idempotency keys; ambiguous outcomes are retained as `unknown` rather than automatically resent.
 
 Initial scheduling follows the gap plan’s 15-minute interpretation. Make the interval configurable and record it in run metadata. Polling interval, feed API limits, and source-specific retention need operator approval before deployment.
 

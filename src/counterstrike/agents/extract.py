@@ -42,6 +42,7 @@ def extract_agent(state: FleetState, llm: LLMPort) -> dict:
     components = {a.inventory_product.casefold() for a in state["inventory"]}
     vocabulary = sorted(components | set(aliases))
     kev = set(state["kev"])
+    kev_complete = state.get("kev_complete", True)
     extracted: list[ExtractedAdvisory] = []
     human: list[NeedsHuman] = []
     llm_calls = 0
@@ -74,7 +75,7 @@ def extract_agent(state: FleetState, llm: LLMPort) -> dict:
                     advisory_id=adv.id,
                     title=adv.title,
                     cvss=adv.cvss,
-                    in_kev=adv.id in kev,
+                    in_kev=(adv.id in kev) if kev_complete else None,
                     products=[
                         AffectedProduct(
                             product=product, affected=s["affected"], fixed_version=s.get("fixed")
@@ -168,7 +169,7 @@ def extract_agent(state: FleetState, llm: LLMPort) -> dict:
                     advisory_id=adv.id,
                     title=adv.title,
                     cvss=adv.cvss,
-                    in_kev=adv.id in kev,
+                    in_kev=(adv.id in kev) if kev_complete else None,
                     products=grounded,
                     method="llm",
                     evidence=[str(e) for e in payload.get("evidence", [])][:5],

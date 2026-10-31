@@ -589,6 +589,18 @@ async function openAlert(alertId) {
     const advisory = detail.advisory || {};
     const asset = detail.asset_context || {};
     const match = detail.match || {};
+    const impactEvidence = (Array.isArray(alert.evidence) ? alert.evidence : [])
+      .filter((line) => typeof line === 'string' && line.startsWith('Impact evidence ['));
+    const matchEvidence = (Array.isArray(alert.evidence) ? alert.evidence : [])
+      .filter((line) => typeof line === 'string' && !line.startsWith('Impact evidence ['));
+    const impactEvidenceHtml = impactEvidence.length
+      ? `<ul class="evidence-list">${impactEvidence.map((line) => {
+        const matchUrl = line.match(/(?:^|; )source_url=(https?:\/\/[^\s;]+)/);
+        const url = checkedHttpUrl(matchUrl?.[1]);
+        const description = matchUrl ? line.replace(matchUrl[0], '') : line;
+        return `<li>${escapeHtml(description)}${url ? ` <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Open source</a>` : ''}</li>`;
+      }).join('')}</ul>`
+      : '<p class="page-description">Dimension-linked source evidence is unavailable for this saved run.</p>';
     const matchHistory = detail.match_history || [];
     const matchHistoryHtml = matchHistory.length
       ? matchHistory.map((entry) => `<div class="review-callout match-history-item"><strong>${escapeHtml(friendlyName(entry.outcome))}</strong> · ${escapeHtml(entry.component)} ${escapeHtml(entry.installed_version)}<p>Compared ${escapeHtml(entry.compared_at || 'date unavailable')} · Run ${escapeHtml((entry.run_id || '').slice(0, 8) || 'unknown')} · ${escapeHtml(entry.comparator || 'comparator unavailable')}</p><p>Affected range: ${escapeHtml(entry.affected_range || 'unavailable')} · Confidence: ${entry.confidence == null ? 'not quantified' : `${Math.round(entry.confidence * 100)}%`}</p><p>${escapeHtml((entry.evidence || []).join(' · '))}</p></div>`).join('')
@@ -597,7 +609,10 @@ async function openAlert(alertId) {
       ? '<p class="page-description">Showing the 20 most recent comparisons.</p>'
       : '';
     const criticality = asset.criticality ? friendlyName(asset.criticality) : 'Not available';
-    const isKev = Boolean(advisory.in_kev);
+    const kevStatus = advisory.kev_status || (advisory.in_kev === true
+      ? 'listed'
+      : advisory.in_kev === false ? 'not_listed' : 'unknown');
+    const isKev = kevStatus === 'listed';
     const epss = advisory.epss || null;
     const epssUrl = checkedHttpUrl(epss?.source_url);
     const epssHtml = !epss
@@ -635,6 +650,7 @@ async function openAlert(alertId) {
     const breakdown = {
       CVSS: storedBreakdown.cvss ?? advisory.cvss ?? 'Unavailable',
       'KEV bonus': storedBreakdown.kev ?? 'Unavailable',
+      'KEV catalog status': friendlyName(storedBreakdown.kev_status || kevStatus),
       'Internet-facing': storedBreakdown.internet_facing ?? 'Unavailable',
       'Asset criticality': storedBreakdown.criticality ?? 'Unavailable',
       'EPSS adjustment': storedBreakdown.epss ?? 0,
@@ -648,14 +664,14 @@ async function openAlert(alertId) {
         : 'Not applied',
     };
     drawerRoot.innerHTML = `<div class="drawer-backdrop" data-close-drawer></div><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title"><div class="drawer-head"><div class="drawer-kicker"><span>ALERT DETAIL - ${escapeHtml(alert.alert_id)}</span><button class="icon-button" type="button" aria-label="Close alert details" data-close-drawer>&times;</button></div><h2 class="drawer-title" id="drawer-title">${escapeHtml(advisory.title || alert.cve_id)}</h2><div class="drawer-subtitle mono">${escapeHtml(alert.cve_id)} - ${escapeHtml(sourceLabel(advisory))}</div></div><div class="drawer-body">
-      <div class="drawer-status-row">${priorityBadge(alert.priority)}${statusBadge('Affected')}<span class="tag">SLA ${alert.sla_hours} h</span>${isKev ? '<span class="tag kev-tag">KEV-listed</span>' : ''}</div>
+      <div class="drawer-status-row">${priorityBadge(alert.priority)}${statusBadge('Affected')}<span class="tag">SLA ${alert.sla_hours} h</span>${isKev ? '<span class="tag kev-tag">KEV-listed</span>' : kevStatus === 'unknown' ? '<span class="tag">KEV status unknown</span>' : '<span class="tag">Not KEV-listed</span>'}</div>
       <section class="drawer-block"><h3>Affected service</h3><div class="asset-box"><strong>${escapeHtml(alert.service)}</strong><p>${escapeHtml(alert.component)} ${escapeHtml(alert.installed_version)} -&gt; fix ${escapeHtml(alert.fixed_version || 'not published')}</p><div class="asset-meta"><span>Asset <strong class="mono">${escapeHtml(alert.asset_id)}</strong></span><span>Owner <strong>${escapeHtml(alert.owner)}</strong></span>${asset.owner_contact ? `<span>Contact <strong>${escapeHtml(asset.owner_contact)}</strong></span>` : ''}<span>${asset.internet_facing ? 'Internet-facing' : 'Internal'}</span><span>${escapeHtml(criticality)} criticality</span>${asset.asset_type ? `<span>Type <strong>${escapeHtml(friendlyName(asset.asset_type))}</strong></span>` : ''}${asset.product ? `<span>Product <strong>${escapeHtml(asset.product)}</strong></span>` : ''}${asset.vendor ? `<span>Vendor <strong>${escapeHtml(asset.vendor)}</strong></span>` : ''}${asset.data_classification ? `<span>Data <strong>${escapeHtml(friendlyName(asset.data_classification))}</strong></span>` : ''}</div></div></section>
       <section class="drawer-block"><h3>Why this priority <span class="mono-label">Policy ${escapeHtml(detail.policy_version || 'unknown')}</span></h3><div class="score-box"><div class="score-top"><span>Risk score</span><strong>${Number(alert.risk_score).toFixed(1)}</strong></div><div class="score-factors">${Object.entries(breakdown).map(([name, value]) => `<div class="factor-row"><span>${escapeHtml(name)}</span><strong>${typeof value === 'number' ? value.toFixed(name.startsWith('EPSS') ? 3 : 1) : escapeHtml(value)}</strong></div>`).join('')}</div></div>${epssSourceUsedUrl ? `<p class="page-description">Scored EPSS source: <a href="${escapeHtml(epssSourceUsedUrl)}" target="_blank" rel="noopener noreferrer">FIRST EPSS API</a></p>` : ''}</section>
       <section class="drawer-block"><h3>Recommended action</h3><div class="fix-box"><strong>Recommended remediation</strong><p>${escapeHtml(alert.remediation)}</p><span class="mono-label">${escapeHtml(citationStatusLabel)}</span></div></section>
       <section class="drawer-block"><h3>Remediation evidence</h3>${remediationCitationsHtml}</section>
       <section class="drawer-block"><h3>Source references</h3>${citationsHtml}</section>
-      <section class="drawer-block"><h3>Impact assessment</h3><div class="review-callout" style="margin:0">${escapeHtml(alert.summary)}</div></section>
-      <section class="drawer-block"><h3>Match decision</h3><div class="review-callout" style="margin:0">${escapeHtml(friendlyName(match.outcome || 'affected'))} · ${escapeHtml(match.comparator || 'comparator unavailable')} · Confidence ${match.confidence == null ? 'not quantified' : `${Math.round(match.confidence * 100)}%`}<br>Affected range: ${escapeHtml(match.affected_range || 'unavailable')}</div><ul class="evidence-list">${[...new Set([...(match.evidence || []), ...(alert.evidence || [])])].map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul></section>
+       <section class="drawer-block"><h3>Impact assessment</h3><div class="review-callout" style="margin:0">${escapeHtml(alert.summary)}</div><div class="review-section-title">Evidence by dimension</div>${impactEvidenceHtml}</section>
+       <section class="drawer-block"><h3>Match decision</h3><div class="review-callout" style="margin:0">${escapeHtml(friendlyName(match.outcome || 'affected'))} · ${escapeHtml(match.comparator || 'comparator unavailable')} · Confidence ${match.confidence == null ? 'not quantified' : `${Math.round(match.confidence * 100)}%`}<br>Affected range: ${escapeHtml(match.affected_range || 'unavailable')}</div><ul class="evidence-list">${[...new Set([...(match.evidence || []), ...matchEvidence])].map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul></section>
        <section class="drawer-block"><h3>Comparison history</h3>${matchHistoryHtml}${matchHistoryLimit}</section>
       <section class="drawer-block"><h3>Advisory context</h3><div class="review-callout" style="margin:0">${escapeHtml(advisory.text || alert.summary)}<br><br><span class="mono-label">Published ${escapeHtml(advisory.published || 'date unavailable')} | CVSS ${advisory.cvss ?? 'unavailable'} | KEV ${isKev ? 'Yes' : 'No'}</span>${epssHtml}</div></section>
       <div class="drawer-footer"><span>Evidence from the persisted run</span><button class="button small" type="button" data-copy-alert="${escapeHtml(alert.cve_id)}">Copy CVE ID</button></div>

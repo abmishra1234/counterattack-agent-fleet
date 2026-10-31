@@ -627,6 +627,7 @@ def fetch_public_feed_bundle(
                     "fetched_at": catalog.fetched_at.isoformat(),
                     "next_cursor": None,
                     "record_count": len(catalog.entries),
+                    "catalog_version": catalog.catalog_version,
                     "error_code": None,
                 }
             )

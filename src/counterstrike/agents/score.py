@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 from counterstrike.config import Settings, load_settings
-from counterstrike.models import Asset, ExtractedAdvisory, FleetState, ScoredMatch
+from counterstrike.models import Asset, ExtractedAdvisory, FleetState, NeedsHuman, ScoredMatch
 from counterstrike.risk_policy import (
     CRITICALITY,
     INTERNET_BONUS,
@@ -42,7 +42,10 @@ def score(
     )
     breakdown = {
         "cvss": adv.cvss,
-        "kev": KEV_BONUS if adv.in_kev else 0.0,
+        "kev": KEV_BONUS if adv.in_kev is True else 0.0,
+        "kev_status": (
+            "listed" if adv.in_kev is True else "not_listed" if adv.in_kev is False else "unknown"
+        ),
         "internet_facing": INTERNET_BONUS if asset.internet_facing else 0.0,
         "criticality": CRITICALITY[asset.criticality],
         "epss": epss_contribution,
@@ -67,7 +70,7 @@ def score(
             and isinstance(epss_observation.get("_source_url"), str)
             else None
         ),
-        "kev_internet_p1_override": float(adv.in_kev and asset.internet_facing),
+        "kev_internet_p1_override": float(adv.in_kev is True and asset.internet_facing),
     }
     total = round(
         max(
@@ -79,7 +82,9 @@ def score(
         ),
         2,
     )
-    prio, sla = priority_for(total, kev=adv.in_kev, internet_facing=asset.internet_facing)
+    prio, sla = priority_for(
+        total, kev=adv.in_kev is True, internet_facing=asset.internet_facing
+    )
     return total, prio, sla, breakdown
 
 
@@ -118,6 +123,8 @@ def score_agent(state: FleetState, *, settings: Settings | None = None) -> dict:
     advs = {a.advisory_id: a for a in state["extracted"]}
     assets = {a.asset_id: a for a in state["inventory"]}
     scored = []
+    needs_human: list[NeedsHuman] = []
+    kev_unknown_advisories: set[str] = set()
     for m in state["matches"]:
         if m.outcome != "affected":
             continue
@@ -137,14 +144,25 @@ def score_agent(state: FleetState, *, settings: Settings | None = None) -> dict:
                 score_breakdown=breakdown,
             )
         )
+        if advs[m.advisory_id].in_kev is None and m.advisory_id not in kev_unknown_advisories:
+            kev_unknown_advisories.add(m.advisory_id)
+            needs_human.append(
+                NeedsHuman(
+                    advisory_id=m.advisory_id,
+                    stage="score",
+                    reason="CISA KEV status is unknown because the catalog was unavailable",
+                )
+            )
     scored.sort(key=lambda s: (-s.risk_score, s.advisory_id, s.asset_id))
     return {
         "scored": scored,
+        "needs_human": needs_human,
         "trace": [
             {
                 "agent": "score",
                 "policy_version": active_policy_version or POLICY_VERSION,
                 "scored": len(scored),
+                "kev_status_unknown": len(kev_unknown_advisories),
                 "by_priority": {
                     p: sum(s.priority == p for s in scored) for p in ("P1", "P2", "P3", "P4")
                 },

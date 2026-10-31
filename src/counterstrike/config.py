@@ -90,6 +90,26 @@ def _decode_llm_audit_key(encoded_key: str, setting_name: str) -> bytes:
     return decoded
 
 
+def _is_mailbox_address(value: str) -> bool:
+    if (
+        len(value) > 254
+        or any(char.isspace() for char in value)
+        or "\r" in value
+        or "\n" in value
+    ):
+        return False
+    if value.count("@") != 1:
+        return False
+    local, domain = value.split("@", 1)
+    return bool(
+        local
+        and domain
+        and "." in domain
+        and not domain.startswith(".")
+        and not domain.endswith(".")
+    )
+
+
 class Settings(BaseModel):
     """Validated settings used by the API and worker processes."""
 
@@ -115,6 +135,23 @@ class Settings(BaseModel):
     outbox_enqueue_enabled: bool = False
     outbox_channel: Literal["email", "teams"] | None = None
     outbox_recipient_map_json: SecretStr | None = None
+    outbox_security_recipient_ref: SecretStr | None = None
+    outbox_delivery_enabled: bool = False
+    outbox_delivery_max_attempts: int = Field(default=3, ge=1, le=10)
+    outbox_delivery_lease_seconds: int = Field(default=90, ge=15, le=3600)
+    outbox_delivery_timeout_seconds: float = Field(default=10, gt=0, le=120)
+    outbox_teams_webhook_url: SecretStr | None = None
+    outbox_teams_security_webhook_url: SecretStr | None = None
+    outbox_smtp_host: str | None = Field(default=None, max_length=255)
+    outbox_smtp_port: int = Field(default=587, ge=1, le=65535)
+    outbox_smtp_username: SecretStr | None = None
+    outbox_smtp_password: SecretStr | None = None
+    outbox_smtp_from: str | None = Field(default=None, max_length=254)
+    outbox_smtp_starttls: bool = True
+    outbox_daily_digest_enabled: bool = False
+    outbox_daily_digest_hour_utc: int = Field(default=9, ge=0, le=23)
+    outbox_daily_digest_minute_utc: int = Field(default=0, ge=0, le=59)
+    outbox_daily_digest_max_items: int = Field(default=100, ge=1, le=500)
 
     public_feeds_enabled: bool = False
     public_feeds_approved: bool = False
@@ -245,6 +282,52 @@ class Settings(BaseModel):
             raise ValueError("OUTBOX_RECIPIENT_MAP_JSON must map owners to bounded recipient refs")
         return value
 
+    @field_validator("outbox_teams_webhook_url")
+    @classmethod
+    def validate_outbox_teams_webhook_url(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        parsed = urlsplit(value.get_secret_value())
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("OUTBOX_TEAMS_WEBHOOK_URL must be an HTTPS URL")
+        if len(value.get_secret_value()) > 4096:
+            raise ValueError("Teams webhook URL is too long")
+        return value
+
+    @field_validator("outbox_teams_security_webhook_url")
+    @classmethod
+    def validate_outbox_teams_security_webhook_url(
+        cls, value: SecretStr | None
+    ) -> SecretStr | None:
+        if value is None:
+            return None
+        parsed = urlsplit(value.get_secret_value())
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("OUTBOX_TEAMS_SECURITY_WEBHOOK_URL must be an HTTPS URL")
+        if len(value.get_secret_value()) > 4096:
+            raise ValueError("Teams security webhook URL is too long")
+        return value
+
+    @field_validator("outbox_security_recipient_ref")
+    @classmethod
+    def validate_outbox_security_recipient_ref(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        cleaned = value.get_secret_value().strip()
+        if len(cleaned) > 320:
+            raise ValueError("OUTBOX_SECURITY_RECIPIENT_REF is too long")
+        return SecretStr(cleaned) if cleaned else None
+
+    @field_validator("outbox_smtp_host")
+    @classmethod
+    def validate_outbox_smtp_host(cls, value: str | None) -> str | None:
+        cleaned = value.strip() if value else None
+        if cleaned and (
+            any(char.isspace() for char in cleaned) or "\r" in cleaned or "\n" in cleaned
+        ):
+            raise ValueError("OUTBOX_SMTP_HOST must be a hostname without whitespace")
+        return cleaned or None
+
     @field_validator("llm_audit_encryption_keyring_json")
     @classmethod
     def validate_llm_audit_keyring(cls, value: SecretStr | None) -> SecretStr | None:
@@ -316,6 +399,53 @@ class Settings(BaseModel):
             self.outbox_channel is None or self.outbox_recipient_map_json is None
         ):
             raise ValueError("Enabled outbox enqueue requires OUTBOX_CHANNEL and recipient mapping")
+        if self.outbox_enqueue_enabled and not self.outbox_security_recipient_ref:
+            raise ValueError(
+                "Enabled outbox enqueue requires OUTBOX_SECURITY_RECIPIENT_REF for P1/P2 routing"
+            )
+        if self.outbox_enqueue_enabled and self.database_url is None:
+            raise ValueError("Enabled outbox enqueue requires DATABASE_URL")
+        if self.outbox_delivery_enabled:
+            if not self.outbox_enqueue_enabled or self.outbox_channel is None:
+                raise ValueError("Outbox delivery requires outbox enqueue and a selected channel")
+            if self.database_url is None or not self.database_url.get_secret_value().startswith(
+                "postgresql+psycopg://"
+            ):
+                raise ValueError("Outbox delivery requires PostgreSQL row-lock support")
+            if self.outbox_delivery_lease_seconds <= self.outbox_delivery_timeout_seconds:
+                raise ValueError("Outbox delivery lease must exceed the provider timeout")
+            if self.outbox_channel == "teams" and self.outbox_teams_webhook_url is None:
+                raise ValueError("Teams delivery requires OUTBOX_TEAMS_WEBHOOK_URL")
+            if self.outbox_channel == "teams" and self.outbox_teams_security_webhook_url is None:
+                raise ValueError("Teams delivery requires a security webhook for priority alerts")
+            if self.outbox_channel == "email" and not (
+                self.outbox_smtp_host
+                and self.outbox_smtp_from
+                and self.outbox_security_recipient_ref
+            ):
+                raise ValueError(
+                    "Email delivery requires SMTP host/from and a security recipient reference"
+                )
+            if self.outbox_channel == "email":
+                recipients = list(self.outbox_recipient_refs.values())
+                if self.outbox_security_recipient_ref:
+                    recipients.append(self.outbox_security_recipient_ref.get_secret_value())
+                if not _is_mailbox_address(self.outbox_smtp_from or "") or any(
+                    not _is_mailbox_address(recipient) for recipient in recipients
+                ):
+                    raise ValueError(
+                        "Email delivery requires plain mailbox addresses for sender and recipients"
+                    )
+            if self.outbox_channel == "email" and not self.outbox_smtp_starttls:
+                raise ValueError("Email delivery requires SMTP STARTTLS")
+            if bool(self.outbox_smtp_username) != bool(self.outbox_smtp_password):
+                raise ValueError("SMTP username and password must be configured together")
+        if self.outbox_daily_digest_enabled and not (
+            self.outbox_delivery_enabled and self.outbox_enqueue_enabled
+        ):
+            raise ValueError("Daily digest requires enabled outbox enqueue and delivery")
+        if self.outbox_smtp_username and not self.outbox_smtp_starttls:
+            raise ValueError("SMTP authentication requires STARTTLS")
         if self.public_feeds_enabled:
             if not self.public_feeds_approved:
                 raise ValueError("Live public feeds require PUBLIC_FEEDS_APPROVED=true")
@@ -457,6 +587,30 @@ def load_settings(dotenv_path: Path = DOTENV_PATH) -> Settings:
             ),
             outbox_channel=optional("OUTBOX_CHANNEL"),
             outbox_recipient_map_json=optional("OUTBOX_RECIPIENT_MAP_JSON"),
+            outbox_security_recipient_ref=values.get("OUTBOX_SECURITY_RECIPIENT_REF") or None,
+            outbox_delivery_enabled=_as_bool(
+                values.get("OUTBOX_DELIVERY_ENABLED", "false"), "OUTBOX_DELIVERY_ENABLED"
+            ),
+            outbox_delivery_max_attempts=values.get("OUTBOX_DELIVERY_MAX_ATTEMPTS", "3"),
+            outbox_delivery_lease_seconds=values.get("OUTBOX_DELIVERY_LEASE_SECONDS", "90"),
+            outbox_delivery_timeout_seconds=values.get("OUTBOX_DELIVERY_TIMEOUT_SECONDS", "10"),
+            outbox_teams_webhook_url=optional("OUTBOX_TEAMS_WEBHOOK_URL"),
+            outbox_teams_security_webhook_url=optional("OUTBOX_TEAMS_SECURITY_WEBHOOK_URL"),
+            outbox_smtp_host=values.get("OUTBOX_SMTP_HOST") or None,
+            outbox_smtp_port=values.get("OUTBOX_SMTP_PORT", "587"),
+            outbox_smtp_username=optional("OUTBOX_SMTP_USERNAME"),
+            outbox_smtp_password=optional("OUTBOX_SMTP_PASSWORD"),
+            outbox_smtp_from=values.get("OUTBOX_SMTP_FROM") or None,
+            outbox_smtp_starttls=_as_bool(
+                values.get("OUTBOX_SMTP_STARTTLS", "true"), "OUTBOX_SMTP_STARTTLS"
+            ),
+            outbox_daily_digest_enabled=_as_bool(
+                values.get("OUTBOX_DAILY_DIGEST_ENABLED", "false"),
+                "OUTBOX_DAILY_DIGEST_ENABLED",
+            ),
+            outbox_daily_digest_hour_utc=values.get("OUTBOX_DAILY_DIGEST_HOUR_UTC", "9"),
+            outbox_daily_digest_minute_utc=values.get("OUTBOX_DAILY_DIGEST_MINUTE_UTC", "0"),
+            outbox_daily_digest_max_items=values.get("OUTBOX_DAILY_DIGEST_MAX_ITEMS", "100"),
             public_feeds_enabled=_as_bool(
                 values.get("PUBLIC_FEEDS_ENABLED", "false"), "PUBLIC_FEEDS_ENABLED"
             ),

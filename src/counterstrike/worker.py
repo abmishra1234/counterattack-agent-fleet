@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import socket
@@ -16,7 +17,9 @@ from counterstrike.artifacts import purge_expired_artifacts
 from counterstrike.audit import append_event
 from counterstrike.config import load_settings
 from counterstrike.db import session_scope
-from counterstrike.db_models import JobRecord, RunRecord
+from counterstrike.db_models import JobRecord, OutboxMessage, RunRecord
+from counterstrike.delivery import DeliveryFailure, send_outbox_message
+from counterstrike.digest_scheduler import start_digest_scheduler
 from counterstrike.graph import run
 from counterstrike.llm import get_llm
 from counterstrike.llm_metering import mark_pending_attempts_unknown
@@ -122,6 +125,186 @@ def heartbeat(job_id: str, worker_id: str, lease_seconds: int) -> bool:
             safe_details={"lease_seconds": lease_seconds},
         )
         return True
+
+
+def process_outbox_once(worker_id: str, settings=None) -> bool:
+    """Claim and deliver at most one outbox row with durable retry and audit states."""
+    settings = settings or load_settings()
+    if not settings.outbox_delivery_enabled:
+        return False
+    now = datetime.now(timezone.utc)
+    claim = None
+    with session_scope(settings) as session:
+        row = session.scalar(
+            select(OutboxMessage)
+            .where(
+                OutboxMessage.channel == settings.outbox_channel,
+                or_(
+                    (OutboxMessage.status.in_(("queued", "retry")))
+                    & or_(
+                        OutboxMessage.next_attempt_at.is_(None),
+                        OutboxMessage.next_attempt_at <= now,
+                    ),
+                    (OutboxMessage.status == "delivering")
+                    & (OutboxMessage.delivery_lease_expires_at <= now),
+                )
+            )
+            .order_by(OutboxMessage.created_at, OutboxMessage.id)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        if row is None:
+            return False
+        if row.status == "delivering":
+            row.status = "unknown"
+            row.last_response_code = "delivery_lease_expired"
+            row.delivery_worker_id = None
+            row.delivery_lease_expires_at = None
+            append_event(
+                session,
+                actor_type="service",
+                actor_id=worker_id,
+                action="delivery_outcome_unknown",
+                event_type="delivery.outbox.outcome_unknown",
+                outcome="unknown",
+                resource_type="outbox_message",
+                resource_id=row.id,
+                run_id=row.run_id,
+                alert_id=row.alert_id,
+                safe_details={"reason": "delivery_lease_expired", "attempt": row.attempt},
+            )
+            return True
+        if row.attempt >= settings.outbox_delivery_max_attempts:
+            row.status = "failed"
+            row.last_response_code = "attempt_limit_reached"
+            row.next_attempt_at = None
+            append_event(
+                session,
+                actor_type="service",
+                actor_id=worker_id,
+                action="delivery_failed",
+                event_type="delivery.outbox.failed",
+                outcome="failure",
+                resource_type="outbox_message",
+                resource_id=row.id,
+                run_id=row.run_id,
+                alert_id=row.alert_id,
+                safe_details={"reason": "attempt_limit_reached", "attempt": row.attempt},
+            )
+            return True
+        row.status = "delivering"
+        row.attempt += 1
+        row.delivery_worker_id = worker_id
+        row.delivery_started_at = now
+        row.delivery_lease_expires_at = now + timedelta(
+            seconds=settings.outbox_delivery_lease_seconds
+        )
+        claim = {
+            "id": row.id,
+            "run_id": row.run_id,
+            "alert_id": row.alert_id,
+            "channel": row.channel,
+            "recipient_ref": row.recipient_ref,
+            "idempotency_key": row.idempotency_key,
+            "payload": row.payload,
+            "attempt": row.attempt,
+        }
+        append_event(
+            session,
+            actor_type="service",
+            actor_id=worker_id,
+            action="delivery_attempt_started",
+            event_type="delivery.outbox.attempt_started",
+            outcome="started",
+            resource_type="outbox_message",
+            resource_id=row.id,
+            run_id=row.run_id,
+            alert_id=row.alert_id,
+            safe_details={
+                "channel": row.channel,
+                "attempt": row.attempt,
+                "recipient_hash": hashlib.sha256(row.recipient_ref.encode("utf-8")).hexdigest()[
+                    :16
+                ],
+            },
+        )
+    if claim is None:
+        return False
+
+    from types import SimpleNamespace
+
+    try:
+        response_code = send_outbox_message(SimpleNamespace(**claim), settings)
+        result = ("delivered", response_code, None)
+    except DeliveryFailure as exc:
+        result = (
+            "unknown" if exc.ambiguous else "retry" if exc.retryable else "failed",
+            exc.code,
+            exc,
+        )
+    except Exception as exc:
+        result = ("unknown", "delivery_internal_error", exc)
+
+    status, response_code, failure = result
+    with session_scope(settings) as session:
+        row = session.scalar(
+            select(OutboxMessage)
+            .where(
+                OutboxMessage.id == claim["id"],
+                OutboxMessage.status == "delivering",
+                OutboxMessage.delivery_worker_id == worker_id,
+            )
+            .with_for_update()
+        )
+        if row is None:
+            return True
+        row.status = status
+        row.last_response_code = response_code[:80]
+        row.delivery_worker_id = None
+        row.delivery_lease_expires_at = None
+        if status == "delivered":
+            row.delivered_at = datetime.now(timezone.utc)
+            row.next_attempt_at = None
+            action, outcome = "delivery_succeeded", "success"
+        elif status == "retry" and row.attempt < settings.outbox_delivery_max_attempts:
+            delay = min(300, 5 * (2 ** max(0, row.attempt - 1)))
+            row.status = "retry"
+            row.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+            action, outcome = "delivery_retry_scheduled", "retry"
+        elif status == "retry":
+            row.status = "failed"
+            row.next_attempt_at = None
+            action, outcome = "delivery_failed", "failure"
+        else:
+            row.next_attempt_at = None
+            action = "delivery_outcome_unknown" if status == "unknown" else "delivery_failed"
+            outcome = "unknown" if status == "unknown" else "failure"
+        append_event(
+            session,
+            actor_type="service",
+            actor_id=worker_id,
+            action=action,
+            event_type=f"delivery.outbox.{action.removeprefix('delivery_')}",
+            outcome=outcome,
+            resource_type="outbox_message",
+            resource_id=row.id,
+            run_id=row.run_id,
+            alert_id=row.alert_id,
+            safe_details={
+                "status": row.status,
+                "response_code": row.last_response_code,
+                "attempt": row.attempt,
+                "error_type": type(failure).__name__ if failure else None,
+                "next_attempt_at": row.next_attempt_at.isoformat() if row.next_attempt_at else None,
+            },
+        )
+    if failure:
+        logger.warning(
+            "outbox_delivery_not_confirmed",
+            extra={"event": "delivery.outbox.attempt_finished", "outbox_id": claim["id"],
+                   "run_id": claim["run_id"], "status": status, "response_code": response_code},
+        )
+    return True
 
 
 def _finish_job_session(
@@ -278,6 +461,7 @@ def main() -> None:
     retention_sweep_interval = 300.0
     last_retention_sweep = 0.0
     source_scheduler = start_source_scheduler(settings)
+    digest_scheduler = start_digest_scheduler(settings)
     logger.info("worker_started", extra={"worker_id": worker_id})
     while True:
         try:
@@ -299,15 +483,19 @@ def main() -> None:
                                 "artifact_count": purged_count,
                             },
                         )
+            outbox_worked = process_outbox_once(worker_id, settings)
             job_id = claim_job(worker_id, lease_seconds)
             if job_id is None:
-                time.sleep(poll_seconds)
+                if not outbox_worked:
+                    time.sleep(poll_seconds)
                 continue
             process_job(job_id, worker_id, lease_seconds)
         except KeyboardInterrupt:
             logger.info("worker_stopping", extra={"worker_id": worker_id})
             if source_scheduler is not None:
                 source_scheduler.shutdown(wait=True)
+            if digest_scheduler is not None:
+                digest_scheduler.shutdown(wait=True)
             return
         except Exception:
             logger.exception("worker_loop_error")

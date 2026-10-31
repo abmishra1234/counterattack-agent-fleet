@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import re
@@ -37,6 +38,7 @@ from counterstrike.db_models import (
     LLMCall,
     LLMExchangeArtifact,
     MatchRecord,
+    OutboxMessage,
     ReviewCase,
     ReviewDecision,
     RunRecord,
@@ -67,20 +69,24 @@ AUDIT_QUERY_VALUE_PATTERNS = {
     "since": re.compile(r"^[0-9TZ:+.\-]{1,40}$"),
     "until": re.compile(r"^[0-9TZ:+.\-]{1,40}$"),
     "provider": re.compile(r"^[A-Za-z0-9._-]{1,80}$"),
-    "model": re.compile(r"^[A-Za-z0-9._:-]{1,80}$"),
+    "model": re.compile(r"^[A-Za-z0-9._:-]{1,160}$"),
     "task": re.compile(r"^[A-Za-z0-9._-]{1,40}$"),
     "prompt_version": re.compile(r"^[A-Za-z0-9._:-]{1,80}$"),
     "group_by": re.compile(r"^[a-z_]{1,24}$"),
     "currency": re.compile(r"^[A-Z]{3}$"),
+    "channel": re.compile(r"^(email|teams)$"),
 }
 AUDIT_QUERY_VALUE_OMITTED = frozenset({"search", "owner", "service", "actor_id"})
+AUDIT_QUERY_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 
 
 def _safe_audit_query_parameters(query_params):
     """Keep bounded, recognized filters in audit records, never free-text values."""
     values: dict[str, str | list[str]] = {}
     omitted_names: set[str] = set()
-    for key, value in list(query_params.multi_items())[:32]:
+    items = query_params.multi_items()
+    truncated_count = max(0, len(items) - 32)
+    for key, value in items[:32]:
         pattern = AUDIT_QUERY_VALUE_PATTERNS.get(key)
         if pattern is not None and pattern.fullmatch(value):
             if key in values:
@@ -90,9 +96,9 @@ def _safe_audit_query_parameters(query_params):
                 )
             else:
                 values[key] = value
-        elif key in AUDIT_QUERY_VALUE_OMITTED:
+        elif key in AUDIT_QUERY_VALUE_OMITTED or AUDIT_QUERY_NAME_PATTERN.fullmatch(key):
             omitted_names.add(key)
-    return values, sorted(omitted_names)
+    return values, sorted(omitted_names), truncated_count
 
 
 class HealthResponse(BaseModel):
@@ -461,7 +467,8 @@ class AlertAdvisoryContext(BaseModel):
     published: str | None = None
     cvss: float | None = None
     text: str = ""
-    in_kev: bool = False
+    in_kev: bool | None = None
+    kev_status: Literal["listed", "not_listed", "unknown"] = "unknown"
     references: list[SourceReference] = Field(default_factory=list)
     epss: AlertEPSSContext | None = None
 
@@ -481,6 +488,7 @@ class AlertAssetContext(BaseModel):
 class AlertScoreBreakdown(BaseModel):
     cvss: float | None = None
     kev: float | None = None
+    kev_status: Literal["listed", "not_listed", "unknown"] | None = None
     internet_facing: float | None = None
     criticality: float | None = None
     epss: float | None = None
@@ -511,6 +519,32 @@ class AlertDetailResponse(AlertListItem):
 
 class AlertListResponse(BaseModel):
     items: list[AlertListItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class DeliveryItem(BaseModel):
+    id: str
+    run_id: str | None
+    alert_id: str | None
+    channel: Literal["email", "teams"]
+    route: str | None
+    recipient_hash: str
+    status: Literal["queued", "delivering", "retry", "delivered", "failed", "unknown"]
+    attempt: int
+    next_attempt_at: datetime | None
+    last_response_code: str | None
+    created_at: datetime
+    delivered_at: datetime | None
+    digest_date: str | None = None
+    alert_count: int | None = None
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+
+
+class DeliveryListResponse(BaseModel):
+    items: list[DeliveryItem]
     total: int
     limit: int
     offset: int
@@ -759,10 +793,10 @@ def create_app(settings=None):
     role_capabilities = {
         "viewer": {"read"},
         "analyst": {"read", "review"},
-        "operator": {"read", "review", "run", "usage", "metrics"},
+        "operator": {"read", "review", "run", "usage", "metrics", "delivery"},
         "audit_reader": {"read", "audit"},
         "llm_audit_reader": {"read", "usage", "llm_content"},
-        "admin": {"read", "review", "run", "usage", "llm_content", "audit", "metrics"},
+        "admin": {"read", "review", "run", "usage", "llm_content", "audit", "metrics", "delivery"},
     }
 
     def can_view_owner_contact():
@@ -780,6 +814,8 @@ def create_app(settings=None):
             return None
         if path == "/api/v1/auth/context" and method == "GET":
             return "read"
+        if path == "/api/v1/deliveries" and method == "GET":
+            return "delivery"
         if path == "/api/data":
             return "read" if method == "GET" else "unmapped"
         if path in {
@@ -1627,6 +1663,64 @@ def create_app(settings=None):
             "snapshot_id": str(snapshot_id),
         }
 
+    @app.get(
+        "/api/v1/deliveries",
+        response_model=DeliveryListResponse,
+        tags=["delivery"],
+    )
+    def list_deliveries(
+        status: Literal["queued", "delivering", "retry", "delivered", "failed", "unknown"]
+        | None = Query(default=None),
+        channel: Literal["email", "teams"] | None = Query(default=None),
+        run_id: str | None = Query(default=None, max_length=36),
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0, le=1_000_000),
+        session=Depends(db_session),
+    ):
+        conditions = []
+        if status:
+            conditions.append(OutboxMessage.status == status)
+        if channel:
+            conditions.append(OutboxMessage.channel == channel)
+        if run_id:
+            conditions.append(OutboxMessage.run_id == run_id)
+        total = int(session.scalar(select(func.count(OutboxMessage.id)).where(*conditions)) or 0)
+        records = session.scalars(
+            select(OutboxMessage)
+            .where(*conditions)
+            .order_by(OutboxMessage.created_at.desc(), OutboxMessage.id.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        return {
+            "items": [
+                {
+                    "id": item.id,
+                    "run_id": item.run_id,
+                    "alert_id": item.alert_id,
+                    "channel": item.channel,
+                    "route": (item.payload or {}).get("delivery_route"),
+                    "recipient_hash": hashlib.sha256(
+                        item.recipient_ref.encode("utf-8")
+                    ).hexdigest()[:16],
+                    "status": item.status,
+                    "attempt": item.attempt,
+                    "next_attempt_at": item.next_attempt_at,
+                    "last_response_code": item.last_response_code,
+                    "created_at": item.created_at,
+                    "delivered_at": item.delivered_at,
+                    "digest_date": (item.payload or {}).get("digest_date"),
+                    "alert_count": (item.payload or {}).get("alert_count"),
+                    "window_start": (item.payload or {}).get("window_start"),
+                    "window_end": (item.payload or {}).get("window_end"),
+                }
+                for item in records
+            ],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+
     @app.get("/api/v1/audit/events", response_model=AuditEventListResponse, tags=["audit"])
     def list_audit_events(
         since: datetime | None = Query(default=None),
@@ -1837,7 +1931,15 @@ def create_app(settings=None):
                 "published": advisory_payload.get("published"),
                 "cvss": float(advisory_record.cvss) if advisory_record.cvss is not None else None,
                 "text": str(advisory_payload.get("text") or "")[:20000],
-                "in_kev": bool(advisory_payload.get("in_kev")),
+                "in_kev": advisory_payload.get("in_kev"),
+                "kev_status": advisory_payload.get(
+                    "kev_status",
+                    "listed"
+                    if advisory_payload.get("in_kev") is True
+                    else "not_listed"
+                    if advisory_payload.get("in_kev") is False
+                    else "unknown",
+                ),
                 "references": source_references,
                 "epss": epss_context,
             }
@@ -2365,9 +2467,11 @@ def create_app(settings=None):
         capability = required_capability(request.url.path, request.method)
         try:
             if capability is not None:
-                query_parameters, omitted_filter_names = _safe_audit_query_parameters(
-                    request.query_params
-                )
+                (
+                    query_parameters,
+                    omitted_filter_names,
+                    truncated_query_parameter_count,
+                ) = _safe_audit_query_parameters(request.query_params)
                 try:
                     factory = get_session_factory(settings)
                     with factory() as session:
@@ -2386,6 +2490,7 @@ def create_app(settings=None):
                                 "method": request.method,
                                 "query_parameters": query_parameters,
                                 "omitted_filter_names": omitted_filter_names,
+                                "truncated_query_parameter_count": truncated_query_parameter_count,
                             },
                         )
                         session.commit()
@@ -2503,9 +2608,11 @@ def create_app(settings=None):
             )
             response.headers["X-Request-ID"] = request_id
             if required_capability(request.url.path, request.method) is not None:
-                query_parameters, omitted_filter_names = _safe_audit_query_parameters(
-                    request.query_params
-                )
+                (
+                    query_parameters,
+                    omitted_filter_names,
+                    truncated_query_parameter_count,
+                ) = _safe_audit_query_parameters(request.query_params)
                 try:
                     factory = get_session_factory(settings)
                     with factory() as session:
@@ -2525,6 +2632,7 @@ def create_app(settings=None):
                                 "duration_ms": duration_ms,
                                 "query_parameters": query_parameters,
                                 "omitted_filter_names": omitted_filter_names,
+                                "truncated_query_parameter_count": truncated_query_parameter_count,
                             },
                         )
                         session.commit()
