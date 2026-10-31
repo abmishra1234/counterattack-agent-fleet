@@ -104,10 +104,16 @@ class GatewayLLM:
     ) -> None:
         self.settings = settings or load_settings()
         if not self.settings.llm_live_calls_enabled:
-            raise RuntimeError("Live LLM calls are disabled; set LLM_LIVE_CALLS_ENABLED only after approvals")
+            raise RuntimeError(
+                "Live LLM calls are disabled; set LLM_LIVE_CALLS_ENABLED only after approvals"
+            )
         if not run_id:
             raise RuntimeError("Audited live LLM calls require a persisted run_id")
-        if not self.settings.llm_base_url or not self.settings.llm_api_key or not self.settings.llm_model:
+        if (
+            not self.settings.llm_base_url
+            or not self.settings.llm_api_key
+            or not self.settings.llm_model
+        ):
             raise RuntimeError("Live LLM provider configuration is incomplete")
         self.run_id = run_id
         self.request_id = request_id
@@ -273,7 +279,9 @@ class GatewayLLM:
             retryable = False
             delay = min(2**retry_index, 8)
             try:
-                with httpx.Client(timeout=settings.llm_timeout_seconds, follow_redirects=False) as client:
+                with httpx.Client(
+                    timeout=settings.llm_timeout_seconds, follow_redirects=False
+                ) as client:
                     response = client.post(endpoint, headers=headers, content=request_body)
                 latency_ms = round((time.perf_counter() - started) * 1000)
                 if not 200 <= response.status_code < 300:
@@ -347,12 +355,14 @@ class GatewayLLM:
                         },
                     )
                     return output
-            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            except httpx.HTTPError as exc:
                 latency_ms = round((time.perf_counter() - started) * 1000)
-                error_code = (
-                    "provider_timeout" if isinstance(exc, httpx.TimeoutException)
-                    else "provider_connection_error"
-                )
+                if isinstance(exc, httpx.TimeoutException):
+                    error_code = "provider_timeout"
+                elif isinstance(exc, (httpx.NetworkError, httpx.RemoteProtocolError)):
+                    error_code = "provider_connection_error"
+                else:
+                    error_code = "provider_transport_error"
                 self._persist_failure(
                     record_id=record.id,
                     error_code=error_code,
@@ -371,14 +381,21 @@ class GatewayLLM:
                     },
                 )
                 last_error_code = error_code
-                retryable = True
+                retryable = isinstance(
+                    exc,
+                    (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError),
+                )
             if not retryable or retry_index >= settings.llm_max_retries:
                 break
             time.sleep(delay)
 
         logger.warning(
             "Audited LLM call exhausted retries",
-            extra={"event": "llm.call.failed", "run_id": self.run_id, "error_code": last_error_code},
+            extra={
+                "event": "llm.call.failed",
+                "run_id": self.run_id,
+                "error_code": last_error_code,
+            },
         )
         raise RuntimeError(f"LLM provider call failed ({last_error_code})")
 

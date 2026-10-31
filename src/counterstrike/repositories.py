@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from counterstrike.audit import append_event
 from counterstrike.config import Settings, load_settings
 from counterstrike.db_models import (
+    AdvisoryEnrichment,
     AdvisoryRecord,
     AlertRecord,
     InventoryAsset,
@@ -26,6 +27,7 @@ from counterstrike.db_models import (
     ReviewCase,
     RunRecord,
     Source,
+    SourceCheckpoint,
 )
 from counterstrike.models import FleetState
 
@@ -44,6 +46,76 @@ def _date(value: str | None) -> datetime | None:
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     except ValueError:
         return None
+
+
+def _persist_source_syncs(session: Session, run_id: str, state: FleetState) -> None:
+    """Persist public-source checkpoints and outcomes with the owning run transaction."""
+    for sync in state.get("source_syncs", []):
+        source_id = sync.get("source_id")
+        status = sync.get("status")
+        if not isinstance(source_id, str) or not source_id or len(source_id) > 40:
+            raise ValueError("invalid_source_sync_id")
+        if status not in {"success", "partial", "failure", "skipped"}:
+            raise ValueError("invalid_source_sync_status")
+        cursor = sync.get("next_cursor")
+        if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 20_000):
+            raise ValueError("invalid_source_sync_cursor")
+
+        source_name = f"public:{source_id}"
+        source = session.scalar(select(Source).where(Source.name == source_name))
+        if source is None:
+            source = Source(
+                name=source_name,
+                source_type="public_feed",
+                safe_configuration={"adapter": source_id},
+            )
+            session.add(source)
+            session.flush()
+
+        checkpoint = session.scalar(
+            select(SourceCheckpoint).where(SourceCheckpoint.source_id == source.id)
+        )
+        if checkpoint is None:
+            checkpoint = SourceCheckpoint(source_id=source.id)
+            session.add(checkpoint)
+        now = datetime.now(timezone.utc)
+        checkpoint.last_attempt_at = now
+        checkpoint.last_status = status
+        error_code = sync.get("error_code")
+        checkpoint.last_error_code = (
+            str(error_code)[:80]
+            if status != "success" and isinstance(error_code, str) and error_code
+            else None
+        )
+        if status in {"success", "partial"} or cursor is not None:
+            checkpoint.cursor = cursor
+        if status == "success":
+            checkpoint.modified_after = _date(sync.get("fetched_at"))
+            checkpoint.last_success_at = now
+            checkpoint.failure_count = 0
+        elif status == "failure":
+            checkpoint.failure_count += 1
+
+        append_event(
+            session,
+            actor_type="service",
+            action=f"source_poll_{status}",
+            event_type=f"source.poll.{status}",
+            outcome="success" if status == "success" else status,
+            resource_type="source",
+            resource_id=source.id,
+            request_id=session.get(RunRecord, run_id).request_id,
+            run_id=run_id,
+            safe_details={
+                "source_id": source_id,
+                "record_count": max(0, int(sync.get("record_count", 0))),
+                **(
+                    {"error_code": checkpoint.last_error_code}
+                    if checkpoint.last_error_code
+                    else {}
+                ),
+            },
+        )
 
 
 def create_run(
@@ -78,6 +150,16 @@ def create_run(
         safe_details={"trigger_type": trigger_type},
     )
     return record
+
+
+def load_source_cursors(session: Session) -> dict[str, str | None]:
+    """Load the last committed public-feed cursor for the next run attempt."""
+    rows = session.execute(
+        select(Source.name, SourceCheckpoint.cursor)
+        .join(SourceCheckpoint, SourceCheckpoint.source_id == Source.id)
+        .where(Source.name.like("public:%"))
+    ).all()
+    return {name.removeprefix("public:"): cursor for name, cursor in rows}
 
 
 def mark_run_started(session: Session, run_id: str) -> RunRecord:
@@ -124,18 +206,29 @@ def persist_run_results(
     if run.status != "running":
         raise ValueError("run_not_running")
 
+    _persist_source_syncs(session, run_id, state)
     advisories = state.get("advisories", [])
     inventory = state.get("inventory", [])
     extracted = {item.advisory_id: item for item in state.get("extracted", [])}
     kev_ids = set(state.get("kev", []))
 
     source_records: dict[str, Source] = {}
+    public_source_ids = {
+        item.get("source_id")
+        for item in state.get("source_syncs", [])
+        if isinstance(item, dict) and isinstance(item.get("source_id"), str)
+    }
     for advisory in advisories:
         if advisory.source not in source_records:
-            name = f"fixture:{advisory.source}"
+            is_public = advisory.source in public_source_ids
+            name = f"{'public' if is_public else 'fixture'}:{advisory.source}"
             source = session.scalar(select(Source).where(Source.name == name))
             if source is None:
-                source = Source(name=name, source_type="fixture", safe_configuration={"feed": advisory.source})
+                source = Source(
+                    name=name,
+                    source_type="public_feed" if is_public else "fixture",
+                    safe_configuration={"feed": advisory.source},
+                )
                 session.add(source)
                 session.flush()
             source_records[advisory.source] = source
@@ -144,7 +237,9 @@ def persist_run_results(
     for advisory in advisories:
         source = source_records[advisory.source]
         payload = _json(advisory)
-        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        encoded = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode()
         content_hash = hashlib.sha256(encoded).hexdigest()
         record = session.scalar(
             select(AdvisoryRecord).where(
@@ -165,7 +260,7 @@ def persist_run_results(
                 canonical_id=advisory.id,
                 title=advisory.title[:500],
                 published_at=_date(advisory.published),
-                cvss=Decimal(str(advisory.cvss)),
+                cvss=Decimal(str(advisory.cvss)) if advisory.cvss is not None else None,
                 source_url=None,
                 source_references=[],
                 content_hash=content_hash,
@@ -177,6 +272,47 @@ def persist_run_results(
         # Existing advisory rows are immutable here. A changed feed version needs
         # a dedicated advisory-version schema before it may replace stored content.
         advisory_records[advisory.id] = record
+
+    # Keep source-derived enrichment separate from the immutable advisory payload.
+    # This permits each observation to retain its provenance and capture time.
+    enrichment_sources: dict[str, Source] = {}
+    for item in state.get("source_enrichments", []):
+        if not isinstance(item, dict):
+            continue
+        advisory_id = item.get("advisory_id")
+        source_id = item.get("source_id")
+        kind = item.get("kind")
+        value = item.get("value")
+        if (
+            not isinstance(advisory_id, str)
+            or not isinstance(source_id, str)
+            or not isinstance(kind, str)
+            or not isinstance(value, dict)
+            or len(kind) > 40
+            or len(json.dumps(value, ensure_ascii=False)) > 100_000
+        ):
+            continue
+        advisory_record = advisory_records.get(advisory_id)
+        if advisory_record is None:
+            continue
+        source = enrichment_sources.get(source_id)
+        if source is None:
+            source = session.scalar(
+                select(Source).where(Source.name == f"public:{source_id}")
+            )
+            if source is None:
+                continue
+            enrichment_sources[source_id] = source
+        observed_at = _date(item.get("observed_at"))
+        enrichment = AdvisoryEnrichment(
+            advisory_id=advisory_record.id,
+            kind=kind,
+            value=value,
+            source_id=source.id,
+            observed_at=observed_at or datetime.now(timezone.utc),
+            source_url=item.get("source_url") if isinstance(item.get("source_url"), str) else None,
+        )
+        session.add(enrichment)
 
     inventory_payload = [_json(asset) for asset in inventory]
     inventory_bytes = json.dumps(
@@ -219,11 +355,19 @@ def persist_run_results(
             run_id=run.id,
             advisory_id=advisory.id,
             inventory_asset_id=asset.id,
-            outcome="affected",
-            explanation={"version_note": match.version_note} if match.version_note else {},
+            outcome=match.outcome,
+            confidence=match.confidence,
+            explanation={
+                **({"version_note": match.version_note} if match.version_note else {}),
+                **(
+                    {"confidence_scope": "deterministic_version_comparison"}
+                    if match.confidence is not None
+                    else {}
+                ),
+            },
             affected_range=match.affected,
-            comparator="pep440",
-            evidence=[],
+            comparator=match.comparator,
+            evidence=match.evidence,
         )
         session.add(row)
         matches_by_pair[(match.advisory_id, match.asset_id)] = row

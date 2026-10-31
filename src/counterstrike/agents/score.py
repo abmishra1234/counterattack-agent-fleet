@@ -38,6 +38,8 @@ def score_agent(state: FleetState) -> dict:
     assets = {a.asset_id: a for a in state["inventory"]}
     scored = []
     for m in state["matches"]:
+        if m.outcome != "affected":
+            continue
         total, prio, sla, breakdown = score(advs[m.advisory_id], assets[m.asset_id])
         scored.append(
             ScoredMatch(

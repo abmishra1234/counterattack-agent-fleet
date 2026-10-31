@@ -68,7 +68,7 @@ async function loadData() {
     const optional = await Promise.allSettled([
       context.capabilities.includes('review') ? apiCollection('/api/v1/reviews?state=open') : Promise.resolve([]),
       apiGet('/api/v1/sources'),
-      apiRequest('/api/v1/health/ready'),
+      apiGet('/api/v1/health/ready'),
       dashboard.latest_run ? apiGet(`/api/v1/runs/${encodeURIComponent(dashboard.latest_run.id)}`) : Promise.resolve(null),
     ]);
     const partialErrors = [];
@@ -93,7 +93,7 @@ async function loadData() {
       alerts: mappedAlerts,
       needsHuman: reviews,
       sources: sourceResponse.items || [],
-      readiness: readinessResult.body || { status: 'unknown', checks: {} },
+      readiness: readinessResult || { status: 'unknown', checks: {} },
       report,
       lastRun: latestRun ? niceDate(latestRun.completed_at || latestRun.created_at) : null,
       capabilities: context.capabilities || [],
@@ -290,9 +290,12 @@ function renderReview() {
   const item = items[selectedReview];
   const evidence = item.source_evidence || {};
   const decisionHistory = (item.decisions || []).map((decision) => `<div class="decision-history-row"><strong>${escapeHtml(friendlyName(decision.disposition))}</strong> - ${escapeHtml(decision.actor_id)} - ${escapeHtml(niceDate(decision.created_at))}<p>${escapeHtml(decision.note || '')}</p></div>`).join('');
+  const candidateMatches = item.candidate_matches || [];
+  const candidateMatchHtml = candidateMatches.length ? candidateMatches.map((match) => `<div class="review-callout"><strong>${escapeHtml(friendlyName(match.outcome))}</strong> · ${escapeHtml(match.asset_id)} · ${escapeHtml(match.component)} ${escapeHtml(match.installed_version)}<p>Affected range: ${escapeHtml(match.affected_range || 'Unavailable')} · Comparator confidence: ${match.confidence == null ? 'Unknown' : `${Math.round(match.confidence * 100)}%`}</p><p>${escapeHtml((match.evidence || []).join(' · '))}</p></div>`).join('') : '<p class="page-description">No comparable asset version was available for this review case.</p>';
+  const candidateMatchLimit = item.candidate_matches_truncated ? '<p class="page-description">Additional candidate comparisons are omitted from this response.</p>' : '';
   app.innerHTML = `${pageHeading('WORKSPACE / REVIEW QUEUE', 'Needs review', 'The fleet leaves uncertain cases for a human instead of guessing.', `<span class="state-badge review">${items.length} open item${items.length === 1 ? '' : 's'}</span>`)}
     <div class="review-layout"><article class="panel"><div class="panel-header"><div class="panel-title">Review queue</div><span class="table-caption">${items.length} item${items.length === 1 ? '' : 's'}</span></div><div class="review-list">${items.map((entry, index) => `<button class="review-item ${index === selectedReview ? 'selected' : ''}" data-review-index="${index}"><div class="review-item-top"><strong>${escapeHtml(entry.cve_id || entry.advisory_id)}</strong><small>${escapeHtml(friendlyName(entry.stage))}</small></div><div class="review-item-title">${escapeHtml(entry.title || 'Advisory details unavailable')}</div><div class="review-item-reason">${escapeHtml(entry.reason)}</div></button>`).join('')}</div></article>
-    <article class="panel review-detail"><div class="review-detail-header">${statusBadge('Human review required', 'review')}<h2>${escapeHtml(item.cve_id || item.advisory_id)}</h2><p class="lead">${escapeHtml(item.title || 'Advisory details unavailable')}</p></div><div class="review-callout"><strong>Why it was held:</strong> ${escapeHtml(item.reason)} The system did not produce a confirmed affected-product and version-range match.</div><div class="review-section-title">Source bulletin</div><div class="bulletin">${escapeHtml(evidence.text || 'Source text is not available.')}</div><div class="review-section-title">Available context</div><div class="source-list-inline"><span class="tag">Source: ${escapeHtml(sourceLabel(evidence))}</span><span class="tag">Published: ${escapeHtml(evidence.published || 'Unknown')}</span><span class="tag">CVSS: ${evidence.cvss ?? 'Not provided'}</span></div><div class="review-section-title">Decision history</div>${decisionHistory || '<p class="page-description">No decisions have been recorded for this case.</p>'}<form id="review-decision-form" class="review-decision-form"><strong>Record an analyst decision</strong><label class="field-label" for="review-disposition">Disposition</label><select id="review-disposition" class="select-control" required><option value="affected_confirmed">Affected confirmed</option><option value="possible_match">Possible match</option><option value="not_affected">Not affected</option><option value="insufficient_evidence">Insufficient evidence</option></select><label class="field-label" for="review-note-input">Decision note</label><textarea id="review-note-input" class="text-input" minlength="1" maxlength="2000" required></textarea><button class="button small" type="submit">Save audited decision</button></form></article></div>`;
+    <article class="panel review-detail"><div class="review-detail-header">${statusBadge('Human review required', 'review')}<h2>${escapeHtml(item.cve_id || item.advisory_id)}</h2><p class="lead">${escapeHtml(item.title || 'Advisory details unavailable')}</p></div><div class="review-callout"><strong>Why it was held:</strong> ${escapeHtml(item.reason)} The system did not produce a confirmed affected-product and version-range match.</div><div class="review-section-title">Candidate version comparisons</div>${candidateMatchHtml}${candidateMatchLimit}<div class="review-section-title">Source bulletin</div><div class="bulletin">${escapeHtml(evidence.text || 'Source text is not available.')}</div><div class="review-section-title">Available context</div><div class="source-list-inline"><span class="tag">Source: ${escapeHtml(sourceLabel(evidence))}</span><span class="tag">Published: ${escapeHtml(evidence.published || 'Unknown')}</span><span class="tag">CVSS: ${evidence.cvss ?? 'Not provided'}</span></div><div class="review-section-title">Decision history</div>${decisionHistory || '<p class="page-description">No decisions have been recorded for this case.</p>'}<form id="review-decision-form" class="review-decision-form"><strong>Record an analyst decision</strong><label class="field-label" for="review-disposition">Disposition</label><select id="review-disposition" class="select-control" required><option value="affected_confirmed">Affected confirmed</option><option value="possible_match">Possible match</option><option value="not_affected">Not affected</option><option value="insufficient_evidence">Insufficient evidence</option></select><label class="field-label" for="review-note-input">Decision note</label><textarea id="review-note-input" class="text-input" minlength="1" maxlength="2000" required></textarea><button class="button small" type="submit">Save audited decision</button></form></article></div>`;
   document.querySelectorAll('[data-review-index]').forEach((button) => button.addEventListener('click', () => { selectedReview = Number(button.dataset.reviewIndex); renderReview(); }));
   document.querySelector('#review-decision-form').addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -318,9 +321,10 @@ function renderHealth() {
   const trace = report?.trace || [];
   const readiness = model.readiness || { status: 'unknown', checks: {} };
   const sourceCards = model.sources.length ? model.sources.map((source) => {
-    const state = source.last_status || (source.enabled ? 'Waiting for first poll' : 'Disabled');
-    const kind = source.last_status === 'success' ? 'healthy' : source.enabled ? 'review' : 'healthy';
-    return `<div class="source-card"><div class="source-card-head"><span class="source-symbol">${escapeHtml(source.name.slice(0, 3).toUpperCase())}</span>${escapeHtml(source.name)}<span class="state-badge ${kind}" style="margin-left:auto">${escapeHtml(state)}</span></div><p>${escapeHtml(friendlyName(source.source_type))}<br>${source.last_success_at ? `Last success ${escapeHtml(niceDate(source.last_success_at))}` : 'No successful poll recorded'}${source.last_error_code ? `<br>Error: ${escapeHtml(source.last_error_code)}` : ''}</p></div>`;
+    const state = source.health || source.last_status || (source.enabled ? 'unknown' : 'disabled');
+    const kind = state === 'healthy' ? 'healthy' : 'review';
+    const failures = Number(source.failure_count || 0);
+    return `<div class="source-card"><div class="source-card-head"><span class="source-symbol">${escapeHtml(source.name.slice(0, 3).toUpperCase())}</span>${escapeHtml(source.name)}<span class="state-badge ${kind}" style="margin-left:auto">${escapeHtml(friendlyName(state))}</span></div><p>${escapeHtml(friendlyName(source.source_type))}<br>${source.last_success_at ? `Last success ${escapeHtml(niceDate(source.last_success_at))}` : 'No successful poll recorded'}${failures ? `<br>Consecutive failures: ${escapeHtml(String(failures))}` : ''}${source.last_error_code ? `<br>Error: ${escapeHtml(source.last_error_code)}` : ''}</p></div>`;
   }).join('') : '<div class="empty-inline">No configured sources are registered.</div>';
   const checkCards = Object.entries(readiness.checks || {}).map(([name, state]) => `<span class="tag">${escapeHtml(friendlyName(name))}: ${escapeHtml(state)}</span>`).join('');
   const runState = report?.status || 'No run recorded';
@@ -360,6 +364,14 @@ async function openAlert(alertId) {
     const alert = { ...baseAlert, ...detail, alert_id: detail.id, asset_id: detail.asset_key };
     const advisory = detail.advisory || {};
     const asset = detail.asset_context || {};
+    const match = detail.match || {};
+    const matchHistory = detail.match_history || [];
+    const matchHistoryHtml = matchHistory.length
+      ? matchHistory.map((entry) => `<div class="review-callout match-history-item"><strong>${escapeHtml(friendlyName(entry.outcome))}</strong> · ${escapeHtml(entry.component)} ${escapeHtml(entry.installed_version)}<p>Compared ${escapeHtml(entry.compared_at || 'date unavailable')} · Run ${escapeHtml((entry.run_id || '').slice(0, 8) || 'unknown')} · ${escapeHtml(entry.comparator || 'comparator unavailable')}</p><p>Affected range: ${escapeHtml(entry.affected_range || 'unavailable')} · Confidence: ${entry.confidence == null ? 'not quantified' : `${Math.round(entry.confidence * 100)}%`}</p><p>${escapeHtml((entry.evidence || []).join(' · '))}</p></div>`).join('')
+      : '<p class="page-description">No earlier comparison records are available.</p>';
+    const matchHistoryLimit = detail.match_history_truncated
+      ? '<p class="page-description">Showing the 20 most recent comparisons.</p>'
+      : '';
     const criticality = asset.criticality ? friendlyName(asset.criticality) : 'Not available';
     const isKev = Boolean(advisory.in_kev);
     const breakdown = {
@@ -373,7 +385,8 @@ async function openAlert(alertId) {
       <section class="drawer-block"><h3>Affected service</h3><div class="asset-box"><strong>${escapeHtml(alert.service)}</strong><p>${escapeHtml(alert.component)} ${escapeHtml(alert.installed_version)} -&gt; fix ${escapeHtml(alert.fixed_version || 'not published')}</p><div class="asset-meta"><span>Asset <strong class="mono">${escapeHtml(alert.asset_id)}</strong></span><span>Owner <strong>${escapeHtml(alert.owner)}</strong></span><span>${asset.internet_facing ? 'Internet-facing' : 'Internal'}</span><span>${escapeHtml(criticality)} criticality</span></div></div></section>
       <section class="drawer-block"><h3>Why this priority</h3><div class="score-box"><div class="score-top"><span>Risk score</span><strong>${Number(alert.risk_score).toFixed(1)}</strong></div><div class="score-factors">${Object.entries(breakdown).map(([name, value]) => `<div class="factor-row"><span>${escapeHtml(name)}</span><strong>${typeof value === 'number' ? value.toFixed(1) : escapeHtml(value)}</strong></div>`).join('')}</div></div></section>
       <section class="drawer-block"><h3>Recommended action</h3><div class="fix-box"><strong>Recommended remediation</strong>${escapeHtml(alert.remediation)}</div></section>
-      <section class="drawer-block"><h3>Evidence</h3><ul class="evidence-list">${(alert.evidence || []).map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul></section>
+      <section class="drawer-block"><h3>Match decision</h3><div class="review-callout" style="margin:0">${escapeHtml(friendlyName(match.outcome || 'affected'))} · ${escapeHtml(match.comparator || 'comparator unavailable')} · Confidence ${match.confidence == null ? 'not quantified' : `${Math.round(match.confidence * 100)}%`}<br>Affected range: ${escapeHtml(match.affected_range || 'unavailable')}</div><ul class="evidence-list">${[...new Set([...(match.evidence || []), ...(alert.evidence || [])])].map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul></section>
+       <section class="drawer-block"><h3>Comparison history</h3>${matchHistoryHtml}${matchHistoryLimit}</section>
       <section class="drawer-block"><h3>Advisory context</h3><div class="review-callout" style="margin:0">${escapeHtml(advisory.text || alert.summary)}<br><br><span class="mono-label">Published ${escapeHtml(advisory.published || 'date unavailable')} | CVSS ${advisory.cvss ?? 'unavailable'} | KEV ${isKev ? 'Yes' : 'No'}</span></div></section>
       <div class="drawer-footer"><span>Evidence from the persisted run</span><button class="button small" type="button" data-copy-alert="${escapeHtml(alert.cve_id)}">Copy CVE ID</button></div>
       </div></aside>`;

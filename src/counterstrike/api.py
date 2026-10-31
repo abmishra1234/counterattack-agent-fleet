@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import case, distinct, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -33,6 +33,7 @@ from counterstrike.db_models import (
     LLMAuditAccess,
     LLMCall,
     LLMExchangeArtifact,
+    MatchRecord,
     ReviewCase,
     ReviewDecision,
     RunRecord,
@@ -52,6 +53,8 @@ AUDIT_QUERY_VALUE_PATTERNS = {
     "status": re.compile(r"^[a-z_]{1,24}$"),
     "outcome": re.compile(r"^[a-z_]{1,24}$"),
     "run_id": re.compile(r"^[0-9a-fA-F-]{1,36}$"),
+    "job_id": re.compile(r"^[0-9a-fA-F-]{1,36}$"),
+    "request_id": re.compile(r"^[A-Za-z0-9._:-]{1,64}$"),
     "advisory_id": re.compile(r"^[0-9a-fA-F-]{1,36}$"),
     "source_id": re.compile(r"^[0-9a-fA-F-]{1,36}$"),
     "since": re.compile(r"^[0-9TZ:+.\-]{1,40}$"),
@@ -109,6 +112,20 @@ class ErrorResponse(BaseModel):
     error: ErrorBody
 
 
+class LegacyPreviewResponse(BaseModel):
+    """Deprecated fixture preview contract retained during frontend migration."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    alerts: list[dict[str, Any]]
+    needs_human: list[dict[str, Any]] = Field(alias="needsHuman")
+    report: dict[str, Any]
+    advisories: list[dict[str, Any]]
+    inventory: list[dict[str, Any]]
+    kev: list[dict[str, Any]]
+    last_run: str = Field(alias="lastRun")
+
+
 class RunListItem(BaseModel):
     id: str
     status: str
@@ -160,12 +177,14 @@ class SourceItem(BaseModel):
     name: str
     source_type: str
     enabled: bool
+    health: Literal["disabled", "unknown", "healthy", "degraded"]
     has_checkpoint: bool
     modified_after: datetime | None
     last_attempt_at: datetime | None
     last_success_at: datetime | None
     last_status: str | None
     last_error_code: str | None
+    failure_count: int
 
 
 class SourceListResponse(BaseModel):
@@ -220,6 +239,31 @@ class ReviewDecisionItem(BaseModel):
     created_at: datetime
 
 
+class MatchEvidenceItem(BaseModel):
+    asset_id: str
+    component: str
+    installed_version: str
+    outcome: Literal["affected", "not_affected", "possible_match"]
+    confidence: float | None
+    affected_range: str | None
+    comparator: str | None
+    explanation: dict[str, Any]
+    evidence: list[str]
+
+
+class MatchHistoryItem(BaseModel):
+    run_id: str
+    outcome: Literal["affected", "not_affected", "possible_match"]
+    asset_key: str
+    component: str
+    installed_version: str
+    confidence: float | None
+    affected_range: str | None
+    comparator: str | None
+    evidence: list[str]
+    compared_at: datetime
+
+
 class ReviewListItem(BaseModel):
     id: str
     run_id: str
@@ -230,6 +274,8 @@ class ReviewListItem(BaseModel):
     reason: str
     source_evidence: dict[str, Any]
     source_references: list[dict[str, Any]]
+    candidate_matches: list[MatchEvidenceItem]
+    candidate_matches_truncated: bool
     state: str
     created_at: datetime
     resolved_at: datetime | None
@@ -291,6 +337,9 @@ class AlertDetailResponse(AlertListItem):
     source_references: list[dict[str, Any]]
     advisory: dict[str, Any]
     asset_context: dict[str, Any]
+    match: MatchEvidenceItem
+    match_history: list[MatchHistoryItem]
+    match_history_truncated: bool
 
 
 class AlertListResponse(BaseModel):
@@ -359,6 +408,10 @@ class LLMUsageReportResponse(BaseModel):
     groups: list[dict[str, Any]]
     total_calls: int
     total_retries: int
+    total_groups: int
+    limit: int
+    offset: int
+    has_more: bool
 
 
 class LLMBudgetsResponse(BaseModel):
@@ -648,6 +701,19 @@ def create_app(settings=None):
             "created_at": record.created_at,
         }
 
+    def match_evidence_item(record, asset=None):
+        return {
+            "asset_id": asset.asset_key if asset else record.inventory_asset_id,
+            "component": asset.component if asset else "unknown",
+            "installed_version": asset.version if asset else "unknown",
+            "outcome": record.outcome,
+            "confidence": record.confidence,
+            "affected_range": record.affected_range,
+            "comparator": record.comparator,
+            "explanation": record.explanation or {},
+            "evidence": record.evidence or [],
+        }
+
     def llm_call_item(record):
         return {
             "id": record.id,
@@ -700,14 +766,25 @@ def create_app(settings=None):
             if settings.environment in {"development", "test"}
             else "unavailable",
             "capabilities": sorted(role_capabilities.get(settings.local_dev_role, set())),
-            "data_mode": "fixture",
+            "data_mode": "public_feeds" if settings.public_feeds_enabled else "fixture",
             "persistence_mode": "database" if settings.database_url is not None else "unconfigured",
             "llm_provider": settings.llm_provider,
             "llm_live_calls_enabled": settings.llm_live_calls_enabled,
         }
 
     def llm_conditions(
-        since, until, run_id, provider, model, task, actor_id, advisory_id, prompt_version, outcome
+        since,
+        until,
+        run_id,
+        request_id,
+        job_id,
+        provider,
+        model,
+        task,
+        actor_id,
+        advisory_id,
+        prompt_version,
+        outcome,
     ):
         conditions = []
         if since:
@@ -726,6 +803,8 @@ def create_app(settings=None):
             conditions.append(LLMCall.started_at < until)
         for column, value in (
             (LLMCall.run_id, run_id),
+            (LLMCall.request_id, request_id),
+            (LLMCall.job_id, job_id),
             (LLMCall.provider, provider),
             (LLMCall.model, model),
             (LLMCall.task, task),
@@ -953,6 +1032,8 @@ def create_app(settings=None):
                     "prompt_version",
                     "llm",
                     "llm_calls",
+                    "source_status",
+                    "source_error_code",
                     "assets",
                     "extracted",
                     "matches",
@@ -1012,6 +1093,26 @@ def create_app(settings=None):
                 .order_by(ReviewDecision.created_at, ReviewDecision.id)
             ).all():
                 decisions.setdefault(item.review_case_id, []).append(item)
+        candidate_matches: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        candidate_matches_truncated = False
+        if cases:
+            match_rows = session.execute(
+                select(MatchRecord, InventoryAsset)
+                .join(InventoryAsset, InventoryAsset.id == MatchRecord.inventory_asset_id)
+                .where(
+                    MatchRecord.run_id.in_({item.run_id for item in cases}),
+                    MatchRecord.advisory_id.in_(advisory_ids),
+                    MatchRecord.outcome == "possible_match",
+                )
+                .order_by(MatchRecord.created_at, MatchRecord.id)
+                .limit(2001)
+            ).all()
+            candidate_matches_truncated = len(match_rows) > 2000
+            for match_record, asset_record in match_rows[:2000]:
+                key = (match_record.run_id, match_record.advisory_id)
+                bucket = candidate_matches.setdefault(key, [])
+                if len(bucket) < 21:
+                    bucket.append(match_evidence_item(match_record, asset_record))
         items = []
         for review_case in cases:
             advisory = advisories.get(review_case.advisory_id)
@@ -1039,6 +1140,17 @@ def create_app(settings=None):
                     "reason": review_case.reason,
                     "source_evidence": source_evidence,
                     "source_references": (advisory.source_references or []) if advisory else [],
+                    "candidate_matches": candidate_matches.get(
+                        (review_case.run_id, review_case.advisory_id), []
+                    )[:20],
+                    "candidate_matches_truncated": (
+                        candidate_matches_truncated
+                        or len(
+                            candidate_matches.get(
+                                (review_case.run_id, review_case.advisory_id), []
+                            )
+                        ) > 20
+                    ),
                     "state": review_case.state,
                     "created_at": review_case.created_at,
                     "resolved_at": review_case.resolved_at,
@@ -1159,12 +1271,26 @@ def create_app(settings=None):
                     "name": source.name,
                     "source_type": source.source_type,
                     "enabled": source.enabled,
+                    "health": (
+                        "disabled"
+                        if not source.enabled
+                        else "unknown"
+                        if checkpoint is None or checkpoint.last_status is None
+                        else "degraded"
+                        if checkpoint.failure_count > 0
+                        else "healthy"
+                        if checkpoint.last_status == "success"
+                        else "unknown"
+                        if checkpoint.last_status == "skipped"
+                        else "degraded"
+                    ),
                     "has_checkpoint": checkpoint is not None,
                     "modified_after": checkpoint.modified_after if checkpoint else None,
                     "last_attempt_at": checkpoint.last_attempt_at if checkpoint else None,
                     "last_success_at": checkpoint.last_success_at if checkpoint else None,
                     "last_status": checkpoint.last_status if checkpoint else None,
                     "last_error_code": checkpoint.last_error_code if checkpoint else None,
+                    "failure_count": checkpoint.failure_count if checkpoint else 0,
                 }
                 for source, checkpoint in rows
             ]
@@ -1296,6 +1422,9 @@ def create_app(settings=None):
         record = session.get(AlertRecord, alert_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Alert not found")
+        match_record = session.get(MatchRecord, record.match_id)
+        if match_record is None:
+            raise HTTPException(status_code=500, detail="Alert match record is missing")
         advisory_record = session.scalar(
             select(AdvisoryRecord)
             .where(AdvisoryRecord.canonical_id == record.cve_id)
@@ -1338,6 +1467,32 @@ def create_app(settings=None):
             if asset
             else {}
         )
+        history_rows = session.execute(
+            select(MatchRecord, InventoryAsset)
+            .join(InventoryAsset, InventoryAsset.id == MatchRecord.inventory_asset_id)
+            .join(AdvisoryRecord, AdvisoryRecord.id == MatchRecord.advisory_id)
+            .where(
+                AdvisoryRecord.canonical_id == record.cve_id,
+                InventoryAsset.asset_key == record.asset_key,
+            )
+            .order_by(MatchRecord.created_at.desc(), MatchRecord.id.desc())
+            .limit(21)
+        ).all()
+        match_history = [
+            {
+                "run_id": historical_match.run_id,
+                "outcome": historical_match.outcome,
+                "asset_key": historical_asset.asset_key,
+                "component": historical_asset.component,
+                "installed_version": historical_asset.installed_version,
+                "confidence": historical_match.confidence,
+                "affected_range": historical_match.affected_range,
+                "comparator": historical_match.comparator,
+                "evidence": historical_match.evidence or [],
+                "compared_at": historical_match.created_at,
+            }
+            for historical_match, historical_asset in history_rows[:20]
+        ]
         return {
             **alert_item(record),
             "summary": record.summary,
@@ -1349,6 +1504,9 @@ def create_app(settings=None):
             "source_references": record.source_references or [],
             "advisory": advisory_context,
             "asset_context": asset_context,
+            "match": match_evidence_item(match_record, asset),
+            "match_history": match_history,
+            "match_history_truncated": len(history_rows) > 20,
         }
 
     def budget_summary(session, filters):
@@ -1461,6 +1619,8 @@ def create_app(settings=None):
         since: datetime | None = Query(default=None),
         until: datetime | None = Query(default=None),
         run_id: str | None = Query(default=None, max_length=36),
+        request_id: str | None = Query(default=None, max_length=64),
+        job_id: str | None = Query(default=None, max_length=36),
         provider: str | None = Query(default=None, max_length=80),
         model: str | None = Query(default=None, max_length=160),
         task: str | None = Query(default=None, max_length=40),
@@ -1469,12 +1629,15 @@ def create_app(settings=None):
         prompt_version: str | None = Query(default=None, max_length=100),
         outcome: str | None = Query(default=None, max_length=32),
         limit: int = Query(default=100, ge=1, le=1000),
+        offset: int = Query(default=0, ge=0, le=1000000),
         session=Depends(db_session),
     ):
         conditions = llm_conditions(
             since,
             until,
             run_id,
+            request_id,
+            job_id,
             provider,
             model,
             task,
@@ -1483,8 +1646,11 @@ def create_app(settings=None):
             prompt_version,
             outcome,
         )
+        day_timestamp = LLMCall.started_at
+        if session.get_bind().dialect.name == "postgresql":
+            day_timestamp = func.timezone("UTC", LLMCall.started_at)
         grouping = {
-            "day": func.date(LLMCall.started_at),
+            "day": func.date(day_timestamp),
             "run": LLMCall.run_id,
             "task": LLMCall.task,
             "provider": LLMCall.provider,
@@ -1499,6 +1665,18 @@ def create_app(settings=None):
             (LLMCall.budget_estimate_usd.is_(None), LLMCall.cost_amount),
             (LLMCall.cost_amount >= LLMCall.budget_estimate_usd, LLMCall.cost_amount),
             else_=LLMCall.budget_estimate_usd,
+        )
+        grouped_rows = (
+            select(
+                grouping.label("group_key"),
+                LLMCall.cost_currency.label("currency"),
+            )
+            .where(*conditions)
+            .group_by(grouping, LLMCall.cost_currency)
+            .subquery()
+        )
+        total_groups = int(
+            session.scalar(select(func.count()).select_from(grouped_rows)) or 0
         )
         rows = session.execute(
             select(
@@ -1528,6 +1706,7 @@ def create_app(settings=None):
             .group_by(grouping, LLMCall.cost_currency)
             .order_by(grouping, LLMCall.cost_currency)
             .limit(limit)
+            .offset(offset)
         ).all()
         total = int(session.scalar(select(func.count(LLMCall.id)).where(*conditions)) or 0)
         total_retries = int(
@@ -1540,6 +1719,10 @@ def create_app(settings=None):
             "group_by": group_by,
             "total_calls": total,
             "total_retries": total_retries,
+            "total_groups": total_groups,
+            "limit": limit,
+            "offset": offset,
+            "has_more": offset + len(rows) < total_groups,
             "groups": [
                 {
                     "key": row.group_key,
@@ -1566,6 +1749,8 @@ def create_app(settings=None):
         since: datetime | None = Query(default=None),
         until: datetime | None = Query(default=None),
         run_id: str | None = Query(default=None, max_length=36),
+        request_id: str | None = Query(default=None, max_length=64),
+        job_id: str | None = Query(default=None, max_length=36),
         provider: str | None = Query(default=None, max_length=80),
         model: str | None = Query(default=None, max_length=160),
         task: str | None = Query(default=None, max_length=40),
@@ -1581,6 +1766,8 @@ def create_app(settings=None):
             since,
             until,
             run_id,
+            request_id,
+            job_id,
             provider,
             model,
             task,
@@ -1758,7 +1945,60 @@ def create_app(settings=None):
         token = request_id_context.set(request_id)
         started = datetime.now(timezone.utc)
         response = None
+        capability = required_capability(request.url.path, request.method)
         try:
+            if capability is not None:
+                query_parameters, omitted_filter_names = _safe_audit_query_parameters(
+                    request.query_params
+                )
+                try:
+                    factory = get_session_factory(settings)
+                    with factory() as session:
+                        append_event(
+                            session,
+                            actor_type="user",
+                            actor_id=settings.local_dev_identity,
+                            action="api_request_started",
+                            event_type="api.request.started",
+                            outcome="started",
+                            resource_type="api_route",
+                            resource_id=request.url.path[:200],
+                            request_id=request_id,
+                            safe_details={
+                                "capability": capability,
+                                "method": request.method,
+                                "query_parameters": query_parameters,
+                                "omitted_filter_names": omitted_filter_names,
+                            },
+                        )
+                        session.commit()
+                except Exception as exc:
+                    app_logger.error(
+                        "Protected API request stopped because its start event could not be "
+                        "persisted",
+                        extra={
+                            "event": "api.request.audit_unavailable",
+                            "error_code": type(exc).__name__,
+                            "method": request.method,
+                            "route": request.url.path,
+                            "request_id": request_id,
+                        },
+                    )
+                    unavailable = JSONResponse(
+                        status_code=503,
+                        content={
+                            "error": {
+                                "code": "audit_unavailable",
+                                "message": (
+                                    "The request could not be processed because audit storage "
+                                    "is unavailable."
+                                ),
+                                "request_id": request_id,
+                            }
+                        },
+                    )
+                    unavailable.headers["X-Request-ID"] = request_id
+                    return unavailable
             response = await call_next(request)
         except Exception as exc:
             app_logger.error(
@@ -1943,7 +2183,12 @@ def create_app(settings=None):
             content={"status": "ready" if ready else "not_ready", "checks": checks},
         )
 
-    @app.get("/api/data", responses={503: {"model": ErrorResponse}}, include_in_schema=False)
+    @app.get(
+        "/api/data",
+        response_model=LegacyPreviewResponse,
+        responses={503: {"model": ErrorResponse}},
+        deprecated=True,
+    )
     async def legacy_preview_data():
         try:
             return _preview_payload(settings)

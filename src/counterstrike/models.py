@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 from pydantic import BaseModel, Field
 
@@ -18,7 +18,7 @@ class Advisory(BaseModel):
     source: Literal["nvd", "vendor_bulletin"]
     published: str
     title: str
-    cvss: float = Field(ge=0, le=10)
+    cvss: float | None = Field(default=None, ge=0, le=10)
     structured: dict | None = None
     text: str = ""
 
@@ -57,6 +57,10 @@ class Match(BaseModel):
     installed_version: str
     affected: str
     fixed_version: str | None
+    comparator: Literal["pep440", "pep440_tolerant"] | None = None
+    outcome: Literal["affected", "not_affected", "possible_match"] = "affected"
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    evidence: list[str] = Field(default_factory=list)
     version_note: str | None = None  # set when the installed version needed tolerant parsing
 
 
@@ -100,6 +104,8 @@ class FleetState(TypedDict, total=False):
     kev: list[str]
     inventory: list[Asset]
     aliases: dict[str, str]
+    source_syncs: list[dict[str, Any]]
+    source_enrichments: list[dict[str, Any]]
     extracted: list[ExtractedAdvisory]
     matches: list[Match]
     scored: list[ScoredMatch]

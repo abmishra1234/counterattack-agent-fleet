@@ -23,14 +23,23 @@ from counterstrike.agents.extract import extract_agent
 from counterstrike.agents.ingest import ingest_agent
 from counterstrike.agents.remediate import remediate_agent
 from counterstrike.agents.score import score_agent
+from counterstrike.config import Settings
 from counterstrike.dispatch import dispatch_agent
 from counterstrike.llm import LLMPort
 from counterstrike.models import FleetState
 
 
-def build_graph(llm: LLMPort):
+def build_graph(
+    llm: LLMPort,
+    *,
+    settings: Settings | None = None,
+    source_cursors: dict[str, str | None] | None = None,
+):
     g = StateGraph(FleetState)
-    g.add_node("ingest", ingest_agent)
+    g.add_node(
+        "ingest",
+        partial(ingest_agent, settings=settings, source_cursors=source_cursors),
+    )
     g.add_node("extract", partial(extract_agent, llm=llm))
     g.add_node("correlate", correlate_agent)
     g.add_node("score", score_agent)
@@ -53,8 +62,15 @@ def build_graph(llm: LLMPort):
     return g.compile()
 
 
-def run(data_dir: str | Path, out_dir: str | Path, llm: LLMPort) -> FleetState:
-    graph = build_graph(llm)
+def run(
+    data_dir: str | Path,
+    out_dir: str | Path,
+    llm: LLMPort,
+    *,
+    settings: Settings | None = None,
+    source_cursors: dict[str, str | None] | None = None,
+) -> FleetState:
+    graph = build_graph(llm, settings=settings, source_cursors=source_cursors)
     return graph.invoke(
         {"data_dir": str(data_dir), "out_dir": str(out_dir), "needs_human": [], "trace": []}
     )

@@ -20,7 +20,12 @@ from counterstrike.db_models import JobRecord, RunRecord
 from counterstrike.graph import run
 from counterstrike.llm import get_llm
 from counterstrike.observability import configure_logging
-from counterstrike.repositories import mark_run_started, persist_run_results
+from counterstrike.repositories import (
+    load_source_cursors,
+    mark_run_started,
+    persist_run_results,
+)
+from counterstrike.source_scheduler import start_source_scheduler
 
 logger = logging.getLogger("counterstrike.worker")
 
@@ -106,7 +111,9 @@ def heartbeat(job_id: str, worker_id: str, lease_seconds: int) -> bool:
         return True
 
 
-def _finish_job_session(session, job_id: str, worker_id: str, *, error_code: str | None = None) -> None:
+def _finish_job_session(
+    session, job_id: str, worker_id: str, *, error_code: str | None = None
+) -> None:
     now = datetime.now(timezone.utc)
     job = session.get(JobRecord, job_id)
     if job is None or job.status != "running" or job.lease_owner != worker_id:
@@ -179,7 +186,9 @@ def process_job(job_id: str, worker_id: str, lease_seconds: int = 90) -> None:
             actor_id = run_record.triggered_by if run_record else None
             mark_run_started(session, run_id)
     except Exception as exc:
-        error_code = "unsupported_job" if str(exc) == "unsupported_job" else "worker_execution_failed"
+        error_code = (
+            "unsupported_job" if str(exc) == "unsupported_job" else "worker_execution_failed"
+        )
         _finish_job(job_id, worker_id, error_code=error_code)
         logger.exception("worker_job_failed", extra={"job_id": job_id, "error_code": error_code})
         return
@@ -200,8 +209,24 @@ def process_job(job_id: str, worker_id: str, lease_seconds: int = 90) -> None:
     heartbeat_thread.start()
     settings = load_settings()
     try:
-        llm = get_llm(settings=settings, run_id=run_id, request_id=request_id, actor_id=actor_id, job_id=job_id)
-        result = run(settings.data_dir, settings.out_dir, llm)
+        llm = get_llm(
+            settings=settings,
+            run_id=run_id,
+            request_id=request_id,
+            actor_id=actor_id,
+            job_id=job_id,
+        )
+        source_cursors: dict[str, str | None] = {}
+        if settings.public_feeds_enabled:
+            with session_scope(settings) as session:
+                source_cursors = load_source_cursors(session)
+        result = run(
+            settings.data_dir,
+            settings.out_dir,
+            llm,
+            settings=settings,
+            source_cursors=source_cursors,
+        )
         stopped.set()
         heartbeat_thread.join(timeout=2)
         if lost_lease.is_set():
@@ -212,18 +237,34 @@ def process_job(job_id: str, worker_id: str, lease_seconds: int = 90) -> None:
     except Exception as exc:
         stopped.set()
         heartbeat_thread.join(timeout=2)
-        error_code = str(exc) if str(exc) in {"unsupported_job", "lease_lost", "run_not_queued", "run_not_running"} else "worker_execution_failed"
+        error_code = (
+            str(exc)
+            if str(exc)
+            in {
+                "unsupported_job",
+                "lease_lost",
+                "run_not_queued",
+                "run_not_running",
+                "public_feeds_unavailable",
+            }
+            else "worker_execution_failed"
+        )
         _finish_job(job_id, worker_id, error_code=error_code)
-        logger.exception("worker_job_failed", extra={"job_id": job_id, "run_id": run_id, "error_code": error_code})
+        logger.exception(
+            "worker_job_failed",
+            extra={"job_id": job_id, "run_id": run_id, "error_code": error_code},
+        )
 
 
 def main() -> None:
     configure_logging()
+    settings = load_settings()
     worker_id = os.getenv("WORKER_ID", f"{socket.gethostname()}-{uuid4().hex[:8]}")
     lease_seconds = max(15, int(os.getenv("WORKER_LEASE_SECONDS", "90")))
     poll_seconds = max(1, float(os.getenv("WORKER_POLL_SECONDS", "2")))
     retention_sweep_interval = 300.0
     last_retention_sweep = 0.0
+    source_scheduler = start_source_scheduler(settings)
     logger.info("worker_started", extra={"worker_id": worker_id})
     while True:
         try:
@@ -252,6 +293,8 @@ def main() -> None:
             process_job(job_id, worker_id, lease_seconds)
         except KeyboardInterrupt:
             logger.info("worker_stopping", extra={"worker_id": worker_id})
+            if source_scheduler is not None:
+                source_scheduler.shutdown(wait=True)
             return
         except Exception:
             logger.exception("worker_loop_error")

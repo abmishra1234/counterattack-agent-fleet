@@ -6,8 +6,9 @@ import json
 import time
 from pathlib import Path
 
+from counterstrike.config import Settings, load_settings
 from counterstrike.models import Advisory, Asset, FleetState
-from counterstrike.sources import FixtureFeedAdapter
+from counterstrike.sources import FixtureFeedAdapter, fetch_public_feed_bundle
 
 
 def _load(path: Path):
@@ -15,13 +16,46 @@ def _load(path: Path):
         return json.load(fh)
 
 
-def ingest_agent(state: FleetState) -> dict:
+def ingest_agent(
+    state: FleetState,
+    *,
+    settings: Settings | None = None,
+    source_cursors: dict[str, str | None] | None = None,
+) -> dict:
     t0 = time.perf_counter()
     data = Path(state["data_dir"])
-    feed_batch = FixtureFeedAdapter(data).fetch()
-    advisories = list(feed_batch.advisories)
+    settings = settings or load_settings()
+    source_trace: list[dict] = []
+    source_syncs: list[dict] = []
+    source_enrichments: list[dict] = []
+    if settings.public_feeds_enabled:
+        bundle = fetch_public_feed_bundle(
+            nvd_api_key=(
+                settings.nvd_api_key.get_secret_value() if settings.nvd_api_key else None
+            ),
+            timeout_seconds=settings.public_feed_timeout_seconds,
+            nvd_cursor=(source_cursors or {}).get("nvd"),
+        )
+        advisories = list(bundle.advisories)
+        kev = list(bundle.kev_ids)
+        source_trace.extend(bundle.trace)
+        source_syncs.extend(bundle.source_syncs)
+        source_enrichments.extend(bundle.enrichments)
+        if not any(item.get("status") in {"success", "partial"} for item in source_syncs):
+            raise RuntimeError("public_feeds_unavailable")
+    else:
+        feed_batch = FixtureFeedAdapter(data).fetch()
+        advisories = list(feed_batch.advisories)
+        kev = list(_load(data / "kev.json")["cve_ids"])
+        source_trace.append(
+            {
+                "agent": "ingest",
+                "source_id": feed_batch.source_id,
+                "fetched_at": feed_batch.fetched_at.isoformat(),
+                "advisories": len(advisories),
+            }
+        )
     inventory = [Asset.model_validate(a) for a in _load(data / "inventory.json")]
-    kev = list(_load(data / "kev.json")["cve_ids"])
     aliases = {k.lower(): v.lower() for k, v in _load(data / "aliases.json").items()}
     unique: list[Advisory] = []
     seen: set[str] = set()
@@ -34,11 +68,12 @@ def ingest_agent(state: FleetState) -> dict:
         "inventory": inventory,
         "kev": kev,
         "aliases": aliases,
+        "source_syncs": source_syncs,
+        "source_enrichments": source_enrichments,
         "trace": [
+            *source_trace,
             {
                 "agent": "ingest",
-                "source_id": feed_batch.source_id,
-                "fetched_at": feed_batch.fetched_at.isoformat(),
                 "advisories": len(unique),
                 "assets": len(inventory),
                 "ms": round((time.perf_counter() - t0) * 1000, 1),

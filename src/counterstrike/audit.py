@@ -15,7 +15,8 @@ from counterstrike.db_models import AuditEvent, AuditStreamHead
 
 
 def _canonical(value: dict[str, Any]) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return encoded.encode("utf-8")
 
 
 def _timestamp(value: datetime) -> str:
@@ -54,9 +55,25 @@ def append_event(
         select(AuditStreamHead).where(AuditStreamHead.stream_name == "global").with_for_update()
     )
     if head is None:
-        head = AuditStreamHead(stream_name="global", last_hash=None)
-        session.add(head)
-        session.flush()
+        dialect = session.get_bind().dialect.name
+        if dialect == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert
+        elif dialect == "sqlite":
+            from sqlalchemy.dialects.sqlite import insert
+        else:
+            raise RuntimeError(f"Audit stream initialization is unsupported for {dialect}")
+        session.execute(
+            insert(AuditStreamHead)
+            .values(stream_name="global", last_hash=None, sequence_number=0)
+            .on_conflict_do_nothing(index_elements=[AuditStreamHead.stream_name])
+        )
+        head = session.scalar(
+            select(AuditStreamHead)
+            .where(AuditStreamHead.stream_name == "global")
+            .with_for_update()
+        )
+        if head is None:
+            raise RuntimeError("The global audit stream head could not be initialized")
 
     event_id = str(uuid4())
     head.sequence_number += 1
@@ -89,7 +106,8 @@ def append_event(
         "prompt_version": prompt_version,
         "previous_hash": head.last_hash,
     }
-    digest = hashlib.sha256((head.last_hash or "").encode("ascii") + b"\n" + _canonical(fields)).hexdigest()
+    digest_payload = (head.last_hash or "").encode("ascii") + b"\n" + _canonical(fields)
+    digest = hashlib.sha256(digest_payload).hexdigest()
     event = AuditEvent(**{**fields, "occurred_at": occurred_at}, event_hash=digest)
     session.add(event)
     head.last_hash = digest
@@ -101,7 +119,10 @@ def verify_chain(session: Session) -> tuple[bool, str | None]:
     """Verify ordered event links and the stored global chain head."""
     events = session.scalars(select(AuditEvent).order_by(AuditEvent.sequence_number)).all()
     previous_hash: str | None = None
+    previous_sequence_number = 0
     for event in events:
+        if event.sequence_number != previous_sequence_number + 1:
+            return False, event.id
         fields = {
             "id": event.id,
             "sequence_number": event.sequence_number,
@@ -130,11 +151,16 @@ def verify_chain(session: Session) -> tuple[bool, str | None]:
             "prompt_version": event.prompt_version,
             "previous_hash": event.previous_hash,
         }
-        expected = hashlib.sha256((previous_hash or "").encode("ascii") + b"\n" + _canonical(fields)).hexdigest()
+        digest_payload = (previous_hash or "").encode("ascii") + b"\n" + _canonical(fields)
+        expected = hashlib.sha256(digest_payload).hexdigest()
         if event.previous_hash != previous_hash or event.event_hash != expected:
             return False, event.id
         previous_hash = event.event_hash
+        previous_sequence_number = event.sequence_number
     head = session.get(AuditStreamHead, "global")
-    if (head.last_hash if head else None) != previous_hash:
+    if (
+        (head.last_hash if head else None) != previous_hash
+        or (head.sequence_number if head else 0) != previous_sequence_number
+    ):
         return False, "global-head"
     return True, None

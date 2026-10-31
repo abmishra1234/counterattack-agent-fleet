@@ -104,6 +104,13 @@ class Settings(BaseModel):
     outbox_channel: Literal["email", "teams"] | None = None
     outbox_recipient_map_json: SecretStr | None = None
 
+    public_feeds_enabled: bool = False
+    public_feeds_approved: bool = False
+    public_feed_scheduler_enabled: bool = False
+    public_feed_poll_interval_minutes: int = Field(default=15, ge=1, le=1440)
+    nvd_api_key: SecretStr | None = None
+    public_feed_timeout_seconds: float = Field(default=20, gt=0, le=120)
+
     llm_provider: Literal["fake", "openai_compatible"] = "fake"
     llm_live_calls_enabled: bool = False
     llm_data_boundary_approved: bool = False
@@ -223,6 +230,17 @@ class Settings(BaseModel):
             self.outbox_channel is None or self.outbox_recipient_map_json is None
         ):
             raise ValueError("Enabled outbox enqueue requires OUTBOX_CHANNEL and recipient mapping")
+        if self.public_feeds_enabled:
+            if not self.public_feeds_approved:
+                raise ValueError("Live public feeds require PUBLIC_FEEDS_APPROVED=true")
+            if self.database_url is None:
+                raise ValueError("Live public feeds require DATABASE_URL for checkpoints")
+        if self.public_feed_scheduler_enabled and not (
+            self.public_feeds_enabled and self.public_feeds_approved and self.database_url
+        ):
+            raise ValueError(
+                "Feed scheduling requires enabled, approved public feeds and DATABASE_URL"
+            )
         if self.environment == "production" and self.api_trusted_local_client_cidrs:
             raise ValueError("API_TRUSTED_LOCAL_CLIENT_CIDRS is only permitted outside production")
         if self.environment == "production" and self.api_host.lower() not in {
@@ -330,6 +348,21 @@ def load_settings(dotenv_path: Path = DOTENV_PATH) -> Settings:
             ),
             outbox_channel=optional("OUTBOX_CHANNEL"),
             outbox_recipient_map_json=optional("OUTBOX_RECIPIENT_MAP_JSON"),
+            public_feeds_enabled=_as_bool(
+                values.get("PUBLIC_FEEDS_ENABLED", "false"), "PUBLIC_FEEDS_ENABLED"
+            ),
+            public_feeds_approved=_as_bool(
+                values.get("PUBLIC_FEEDS_APPROVED", "false"), "PUBLIC_FEEDS_APPROVED"
+            ),
+            public_feed_scheduler_enabled=_as_bool(
+                values.get("PUBLIC_FEED_SCHEDULER_ENABLED", "false"),
+                "PUBLIC_FEED_SCHEDULER_ENABLED",
+            ),
+            public_feed_poll_interval_minutes=values.get(
+                "PUBLIC_FEED_POLL_INTERVAL_MINUTES", "15"
+            ),
+            nvd_api_key=optional("NVD_API_KEY"),
+            public_feed_timeout_seconds=values.get("PUBLIC_FEED_TIMEOUT_SECONDS", "20"),
             llm_provider=provider,
             llm_live_calls_enabled=_as_bool(
                 values.get("LLM_LIVE_CALLS_ENABLED", "false"), "LLM_LIVE_CALLS_ENABLED"

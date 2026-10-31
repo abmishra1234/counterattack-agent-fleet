@@ -48,6 +48,15 @@ def extract_agent(state: FleetState, llm: LLMPort) -> dict:
 
     for adv in state["advisories"]:
         injection = detect_injection(adv.text)
+        if adv.cvss is None:
+            human.append(
+                NeedsHuman(
+                    advisory_id=adv.id,
+                    stage="extract",
+                    reason="CVSS score is unavailable; automated prioritisation is incomplete",
+                )
+            )
+            continue
         if adv.structured:
             s = adv.structured
             product = _normalise(s["product"], aliases)
@@ -100,7 +109,12 @@ def extract_agent(state: FleetState, llm: LLMPort) -> dict:
         except Exception as exc:
             logger.warning(
                 "Extraction model call failed; routing advisory to review",
-                extra={"event": "agent.extract.call_failed", "task": "extract", "advisory_id": adv.id, "error_code": type(exc).__name__},
+                extra={
+                    "event": "agent.extract.call_failed",
+                    "task": "extract",
+                    "advisory_id": adv.id,
+                    "error_code": type(exc).__name__,
+                },
             )
             human.append(
                 NeedsHuman(
