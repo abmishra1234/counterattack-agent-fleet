@@ -90,9 +90,14 @@ def claim_job(worker_id: str, lease_seconds: int = 90) -> str | None:
                         safe_details={"error_code": job.last_error_code},
                     )
             append_event(
-                session, actor_type="service", action="job_failed",
-                event_type="job.lifecycle.failed", outcome="failure",
-                resource_type="job", resource_id=job.id, run_id=job.run_id,
+                session,
+                actor_type="service",
+                action="job_failed",
+                event_type="job.lifecycle.failed",
+                outcome="failure",
+                resource_type="job",
+                resource_id=job.id,
+                run_id=job.run_id,
                 safe_details={"error_code": job.last_error_code},
             )
             return None
@@ -101,9 +106,14 @@ def claim_job(worker_id: str, lease_seconds: int = 90) -> str | None:
         job.lease_owner = worker_id
         job.lease_expires_at = now + timedelta(seconds=lease_seconds)
         append_event(
-            session, actor_type="service", action="job_claimed",
-            event_type="job.lifecycle.claimed", outcome="success",
-            resource_type="job", resource_id=job.id, run_id=job.run_id,
+            session,
+            actor_type="service",
+            action="job_claimed",
+            event_type="job.lifecycle.claimed",
+            outcome="success",
+            resource_type="job",
+            resource_id=job.id,
+            run_id=job.run_id,
             request_id=session.get(RunRecord, job.run_id).request_id if job.run_id else None,
             safe_details={"attempt": job.attempt, "lease_seconds": lease_seconds},
         )
@@ -119,9 +129,14 @@ def heartbeat(job_id: str, worker_id: str, lease_seconds: int) -> bool:
             return False
         job.lease_expires_at = now + timedelta(seconds=lease_seconds)
         append_event(
-            session, actor_type="service", action="job_heartbeat",
-            event_type="job.lifecycle.heartbeat", outcome="success",
-            resource_type="job", resource_id=job.id, run_id=job.run_id,
+            session,
+            actor_type="service",
+            action="job_heartbeat",
+            event_type="job.lifecycle.heartbeat",
+            outcome="success",
+            resource_type="job",
+            resource_id=job.id,
+            run_id=job.run_id,
             safe_details={"lease_seconds": lease_seconds},
         )
         return True
@@ -147,7 +162,7 @@ def process_outbox_once(worker_id: str, settings=None) -> bool:
                     ),
                     (OutboxMessage.status == "delivering")
                     & (OutboxMessage.delivery_lease_expires_at <= now),
-                )
+                ),
             )
             .order_by(OutboxMessage.created_at, OutboxMessage.id)
             .limit(1)
@@ -301,8 +316,13 @@ def process_outbox_once(worker_id: str, settings=None) -> bool:
     if failure:
         logger.warning(
             "outbox_delivery_not_confirmed",
-            extra={"event": "delivery.outbox.attempt_finished", "outbox_id": claim["id"],
-                   "run_id": claim["run_id"], "status": status, "response_code": response_code},
+            extra={
+                "event": "delivery.outbox.attempt_finished",
+                "outbox_id": claim["id"],
+                "run_id": claim["run_id"],
+                "status": status,
+                "response_code": response_code,
+            },
         )
     return True
 
@@ -332,9 +352,14 @@ def _finish_job_session(
     job.lease_owner = None
     job.lease_expires_at = None
     append_event(
-        session, actor_type="service", action=action,
-        event_type=f"job.lifecycle.{job.status}", outcome=outcome,
-        resource_type="job", resource_id=job.id, run_id=job.run_id,
+        session,
+        actor_type="service",
+        action=action,
+        event_type=f"job.lifecycle.{job.status}",
+        outcome=outcome,
+        resource_type="job",
+        resource_id=job.id,
+        run_id=job.run_id,
         safe_details={"attempt": job.attempt, **({"error_code": error_code} if error_code else {})},
     )
     if error_code and job.run_id:
@@ -351,10 +376,15 @@ def _finish_job_session(
                 record.completed_at = now
                 event_action, event_outcome = "run_failed", "failure"
             append_event(
-                session, actor_type="service", action=event_action,
-                event_type=f"run.lifecycle.{record.status}", outcome=event_outcome,
-                resource_type="run", resource_id=record.id,
-                request_id=record.request_id, run_id=record.id,
+                session,
+                actor_type="service",
+                action=event_action,
+                event_type=f"run.lifecycle.{record.status}",
+                outcome=event_outcome,
+                resource_type="run",
+                resource_id=record.id,
+                request_id=record.request_id,
+                run_id=record.id,
                 safe_details={"error_code": error_code},
             )
 

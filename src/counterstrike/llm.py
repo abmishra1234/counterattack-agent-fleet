@@ -207,9 +207,7 @@ class GatewayLLM:
     def complete(self, task: str, system: str, user: str, context: dict) -> str:
         settings = self.settings
         token_limit_field = (
-            "max_completion_tokens"
-            if settings.llm_provider == "azure_openai"
-            else "max_tokens"
+            "max_completion_tokens" if settings.llm_provider == "azure_openai" else "max_tokens"
         )
         provider_request = {
             "model": settings.llm_model,
@@ -345,10 +343,13 @@ class GatewayLLM:
                 elif not 200 <= response.status_code < 300:
                     status = response.status_code
                     error_code = (
-                        "provider_rate_limited" if status == 429 else
-                        "provider_timeout" if status == 408 else
-                        "provider_unavailable" if status >= 500 else
-                        "provider_request_rejected"
+                        "provider_rate_limited"
+                        if status == 429
+                        else "provider_timeout"
+                        if status == 408
+                        else "provider_unavailable"
+                        if status >= 500
+                        else "provider_request_rejected"
                     )
                     retryable = status in {408, 429, 500, 502, 503, 504}
                     if retry_after := response.headers.get("Retry-After"):

@@ -116,9 +116,7 @@ def _persist_source_syncs(session: Session, run_id: str, state: FleetState) -> N
                     else {}
                 ),
                 **(
-                    {"error_code": checkpoint.last_error_code}
-                    if checkpoint.last_error_code
-                    else {}
+                    {"error_code": checkpoint.last_error_code} if checkpoint.last_error_code else {}
                 ),
             },
         )
@@ -265,7 +263,9 @@ def persist_run_results(
         kev_value = (
             enriched.in_kev
             if enriched is not None
-            else (advisory.id in kev_ids) if state.get("kev_complete", True) else None
+            else (advisory.id in kev_ids)
+            if state.get("kev_complete", True)
+            else None
         )
         normalized_payload = {
             **payload,
@@ -319,9 +319,7 @@ def persist_run_results(
             continue
         source = enrichment_sources.get(source_id)
         if source is None:
-            source = session.scalar(
-                select(Source).where(Source.name == f"public:{source_id}")
-            )
+            source = session.scalar(select(Source).where(Source.name == f"public:{source_id}"))
             if source is None:
                 continue
             enrichment_sources[source_id] = source
@@ -453,12 +451,14 @@ def persist_run_results(
         if key in seen_reviews:
             continue
         seen_reviews.add(key)
-        session.add(ReviewCase(
-            run_id=run.id,
-            advisory_id=advisory.id,
-            stage=item.stage,
-            reason=item.reason,
-        ))
+        session.add(
+            ReviewCase(
+                run_id=run.id,
+                advisory_id=advisory.id,
+                stage=item.stage,
+                reason=item.reason,
+            )
+        )
 
     alert_count = len(state.get("alerts", []))
     review_count = len(state.get("needs_human", []))

@@ -137,8 +137,7 @@ def send_outbox_message(message, settings: Settings) -> str:
     email["To"] = recipient
     if payload.get("digest") is True:
         subject = (
-            f"[Counterstrike] Daily vulnerability digest — "
-            f"{payload.get('alert_count', 0)} alerts"
+            f"[Counterstrike] Daily vulnerability digest — {payload.get('alert_count', 0)} alerts"
         )
     else:
         subject = (

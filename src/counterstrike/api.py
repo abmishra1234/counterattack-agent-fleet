@@ -887,12 +887,16 @@ def create_app(settings=None):
     def required_capability(path, method):
         if path == "/metrics":
             return "metrics" if settings.metrics_enabled else None
-        if path in {
-            "/health/live",
-            "/api/v1/health/live",
-            "/health/ready",
-            "/api/v1/health/ready",
-        } and method == "GET":
+        if (
+            path
+            in {
+                "/health/live",
+                "/api/v1/health/live",
+                "/health/ready",
+                "/api/v1/health/ready",
+            }
+            and method == "GET"
+        ):
             return None
         if path == "/api/v1/auth/context" and method == "GET":
             return "read"
@@ -905,9 +909,7 @@ def create_app(settings=None):
             "/api/v1/sources",
             "/api/v1/alerts",
             "/api/v1/inventory",
-        } or re.fullmatch(
-            r"/api/v1/alerts/[^/]+", path
-        ):
+        } or re.fullmatch(r"/api/v1/alerts/[^/]+", path):
             return "read" if method == "GET" else "unmapped"
         if path == "/api/v1/runs" and method == "POST":
             return "run"
@@ -1128,9 +1130,7 @@ def create_app(settings=None):
             "safe_error_code": record.safe_error_code,
         }
 
-    @app.get(
-        "/api/v1/auth/context", response_model=AuthContextResponse, tags=["auth"]
-    )
+    @app.get("/api/v1/auth/context", response_model=AuthContextResponse, tags=["auth"])
     def auth_context():
         return {
             "identity": settings.local_dev_identity,
@@ -1252,9 +1252,7 @@ def create_app(settings=None):
 
     @app.get("/api/v1/runs", response_model=RunListResponse, tags=["runs"])
     def list_runs(
-        status: Literal["queued", "running", "succeeded", "failed"] | None = Query(
-            default=None
-        ),
+        status: Literal["queued", "running", "succeeded", "failed"] | None = Query(default=None),
         limit: int = Query(default=25, ge=1, le=100),
         offset: int = Query(default=0, ge=0, le=1000000),
         session=Depends(db_session),
@@ -1567,10 +1565,9 @@ def create_app(settings=None):
                     "candidate_matches_truncated": (
                         candidate_matches_truncated
                         or len(
-                            candidate_matches.get(
-                                (review_case.run_id, review_case.advisory_id), []
-                            )
-                        ) > 20
+                            candidate_matches.get((review_case.run_id, review_case.advisory_id), [])
+                        )
+                        > 20
                     ),
                     "state": review_case.state,
                     "created_at": review_case.created_at,
@@ -1727,9 +1724,8 @@ def create_app(settings=None):
         asset_type: Literal["application", "service", "vendor_product", "saas"] | None = Query(
             default=None
         ),
-        data_classification: Literal[
-            "public", "internal", "confidential", "restricted"
-        ] | None = Query(default=None),
+        data_classification: Literal["public", "internal", "confidential", "restricted"]
+        | None = Query(default=None),
         session=Depends(db_session),
     ):
         snapshot_id = session.scalar(
@@ -1772,9 +1768,7 @@ def create_app(settings=None):
             )
         total = session.scalar(select(func.count()).select_from(statement.subquery())) or 0
         rows = session.scalars(
-            statement.order_by(InventoryAsset.asset_key)
-            .limit(limit)
-            .offset(offset)
+            statement.order_by(InventoryAsset.asset_key).limit(limit).offset(offset)
         ).all()
         items = []
         for asset in rows:
@@ -2040,17 +2034,11 @@ def create_app(settings=None):
             reference
             for reference in source_references
             if remediation_tags
-            & {
-                tag.strip().casefold()
-                for tag in reference.get("tags", [])
-                if isinstance(tag, str)
-            }
+            & {tag.strip().casefold() for tag in reference.get("tags", []) if isinstance(tag, str)}
         ]
         citation_status = "cited" if remediation_sources else "unverified"
         epss_payload = (
-            epss_record.value
-            if epss_record and isinstance(epss_record.value, dict)
-            else {}
+            epss_record.value if epss_record and isinstance(epss_record.value, dict) else {}
         )
         epss_status = epss_payload.get("status")
         epss_context = (
@@ -2330,9 +2318,7 @@ def create_app(settings=None):
             .group_by(grouping, LLMCall.cost_currency)
             .subquery()
         )
-        total_groups = int(
-            session.scalar(select(func.count()).select_from(grouped_rows)) or 0
-        )
+        total_groups = int(session.scalar(select(func.count()).select_from(grouped_rows)) or 0)
         rows = session.execute(
             select(
                 grouping.label("group_key"),
@@ -2359,9 +2345,7 @@ def create_app(settings=None):
                 func.sum(case((LLMCall.outcome == "unknown", 1), else_=0)).label(
                     "unknown_outcome_calls"
                 ),
-                func.sum(case((LLMCall.outcome == "pending", 1), else_=0)).label(
-                    "pending_calls"
-                ),
+                func.sum(case((LLMCall.outcome == "pending", 1), else_=0)).label("pending_calls"),
             )
             .where(*conditions)
             .group_by(grouping, LLMCall.cost_currency)
@@ -2851,9 +2835,7 @@ def create_app(settings=None):
         )
         return JSONResponse(
             status_code=exc.status_code,
-            content={
-                "error": {"code": code, "message": message, "request_id": request_id}
-            },
+            content={"error": {"code": code, "message": message, "request_id": request_id}},
             headers={**(exc.headers or {}), "X-Request-ID": request_id},
         )
 
@@ -2931,9 +2913,7 @@ def create_app(settings=None):
                 }
                 for status, count in job_rows:
                     bounded_status = status if status in allowed_job_statuses else "other"
-                    lines.append(
-                        f'counterstrike_jobs{{status="{bounded_status}"}} {int(count)}'
-                    )
+                    lines.append(f'counterstrike_jobs{{status="{bounded_status}"}} {int(count)}')
                 lines.extend(
                     [
                         "# HELP counterstrike_llm_calls Recorded LLM calls by outcome.",
@@ -3063,9 +3043,7 @@ def create_app(settings=None):
         error_response = {
             "description": "The request could not be completed.",
             "content": {
-                "application/json": {
-                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
-                }
+                "application/json": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}
             },
         }
         for path, operations in schema.get("paths", {}).items():

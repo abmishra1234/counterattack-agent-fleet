@@ -105,16 +105,29 @@ def read_artifact(
             outcome = "key_unavailable"
         except (InvalidTag, UnicodeDecodeError, ValueError):
             outcome = "integrity_failure"
-    session.add(LLMAuditAccess(
-        id=str(uuid4()), llm_call_id=artifact.llm_call_id, artifact_id=artifact.id,
-        actor_id=actor_id, request_id=request_id, purpose=bounded_purpose or "missing purpose",
-        action="read", outcome=outcome,
-    ))
+    session.add(
+        LLMAuditAccess(
+            id=str(uuid4()),
+            llm_call_id=artifact.llm_call_id,
+            artifact_id=artifact.id,
+            actor_id=actor_id,
+            request_id=request_id,
+            purpose=bounded_purpose or "missing purpose",
+            action="read",
+            outcome=outcome,
+        )
+    )
     append_event(
-        session, actor_type="user", actor_id=actor_id, action="llm_artifact_read",
-        event_type="llm.audit.content_access", outcome=outcome,
-        resource_type="llm_exchange_artifact", resource_id=artifact.id,
-        request_id=request_id, llm_call_id=artifact.llm_call_id,
+        session,
+        actor_type="user",
+        actor_id=actor_id,
+        action="llm_artifact_read",
+        event_type="llm.audit.content_access",
+        outcome=outcome,
+        resource_type="llm_exchange_artifact",
+        resource_id=artifact.id,
+        request_id=request_id,
+        llm_call_id=artifact.llm_call_id,
         safe_details={"artifact_kind": artifact.artifact_kind},
     )
     session.flush()

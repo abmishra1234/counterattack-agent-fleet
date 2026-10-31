@@ -160,8 +160,10 @@ def _first_text(items: Any) -> str | None:
     if not isinstance(items, list):
         return None
     for item in items:
-        if isinstance(item, dict) and item.get("lang") == "en" and isinstance(
-            item.get("value"), str
+        if (
+            isinstance(item, dict)
+            and item.get("lang") == "en"
+            and isinstance(item.get("value"), str)
         ):
             value = item["value"].strip()
             if value:
@@ -780,9 +782,7 @@ def fetch_public_feed_bundle(
                         raise ValueError
                 except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                     raise ValueError("Invalid EPSS enrichment cursor") from None
-            candidate_ids = dict.fromkeys(
-                [*pending_ids, *(advisory.id for advisory in advisories)]
-            )
+            candidate_ids = dict.fromkeys([*pending_ids, *(advisory.id for advisory in advisories)])
             epss_ids = list(candidate_ids)
             if len(epss_ids) > MAX_EPSS_BACKLOG_IDS:
                 raise ValueError("EPSS enrichment backlog exceeds the supported bound")

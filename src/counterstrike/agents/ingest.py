@@ -31,9 +31,7 @@ def ingest_agent(
     source_enrichments: list[dict] = []
     if settings.public_feeds_enabled:
         bundle = fetch_public_feed_bundle(
-            nvd_api_key=(
-                settings.nvd_api_key.get_secret_value() if settings.nvd_api_key else None
-            ),
+            nvd_api_key=(settings.nvd_api_key.get_secret_value() if settings.nvd_api_key else None),
             timeout_seconds=settings.public_feed_timeout_seconds,
             nvd_cursor=(source_cursors or {}).get("nvd"),
             epss_cursor=(source_cursors or {}).get("epss"),
@@ -97,6 +95,6 @@ def ingest_agent(
                 "advisories": len(unique),
                 "assets": len(inventory),
                 "ms": round((time.perf_counter() - t0) * 1000, 1),
-            }
+            },
         ],
     }

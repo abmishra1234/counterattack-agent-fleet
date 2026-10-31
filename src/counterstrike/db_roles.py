@@ -56,9 +56,7 @@ def provision_runtime_role() -> None:
             )
         )
         connection.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
-        connection.execute(
-            sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(role_identifier)
-        )
+        connection.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(role_identifier))
         connection.execute(
             sql.SQL(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {}"

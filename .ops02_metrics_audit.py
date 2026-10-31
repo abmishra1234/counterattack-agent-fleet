@@ -33,8 +33,7 @@ for line in metrics.splitlines():
     labels = re.findall(r'([a-z_]+)="([^"]*)"', line)
     assert labels and all(name in allowed_labels for name, _ in labels), line
     assert all(
-        name != "route" or value == "unmatched" or value.startswith("/")
-        for name, value in labels
+        name != "route" or value == "unmatched" or value.startswith("/") for name, value in labels
     ), line
 
 with session_scope() as session:

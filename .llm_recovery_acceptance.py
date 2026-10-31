@@ -70,12 +70,16 @@ with session_scope() as session:
     assert event_types == ["llm.call.outcome_unknown", "job.lifecycle.claimed"], event_types
     assert valid, failure
 
-print(json.dumps({
-    "claimed_job": job.id,
-    "job_attempt": job.attempt,
-    "llm_outcome": call.outcome,
-    "safe_error_code": call.safe_error_code,
-    "budget_estimate_usd": str(call.budget_estimate_usd),
-    "audit_events": event_types,
-    "audit_chain_valid": valid,
-}))
+print(
+    json.dumps(
+        {
+            "claimed_job": job.id,
+            "job_attempt": job.attempt,
+            "llm_outcome": call.outcome,
+            "safe_error_code": call.safe_error_code,
+            "budget_estimate_usd": str(call.budget_estimate_usd),
+            "audit_events": event_types,
+            "audit_chain_valid": valid,
+        }
+    )
+)

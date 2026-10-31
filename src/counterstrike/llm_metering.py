@@ -73,9 +73,7 @@ def _pricing_rate(session: Session, settings: Settings, now: datetime) -> LLMPri
             if insert is None:
                 raise RuntimeError("LLM pricing registry requires PostgreSQL or SQLite")
             result = session.execute(
-                insert(LLMPricingRate)
-                .values(**values)
-                .on_conflict_do_nothing()
+                insert(LLMPricingRate).values(**values).on_conflict_do_nothing()
             )
             session.flush()
             existing = session.scalar(
@@ -206,19 +204,28 @@ def _reserve_budget(
         else_=LLMCall.budget_estimate_usd,
     )
     for _, _period_start, limit, scope in scopes:
-        filters = [LLMCall.run_id == run_id] if scope == "run" else [
-            LLMCall.started_at >= month_start,
-        ]
-        unknown_count = session.scalar(
-            select(func.count(LLMCall.id)).where(
-                *filters,
-                LLMCall.cost_amount.is_(None),
-                LLMCall.budget_estimate_usd.is_(None),
+        filters = (
+            [LLMCall.run_id == run_id]
+            if scope == "run"
+            else [
+                LLMCall.started_at >= month_start,
+            ]
+        )
+        unknown_count = (
+            session.scalar(
+                select(func.count(LLMCall.id)).where(
+                    *filters,
+                    LLMCall.cost_amount.is_(None),
+                    LLMCall.budget_estimate_usd.is_(None),
+                )
             )
-        ) or 0
+            or 0
+        )
         used = session.scalar(select(func.sum(effective_cost)).where(*filters)) or Decimal(0)
-        reason = "unknown_historical_cost" if unknown_count else (
-            "limit_exceeded" if Decimal(used) + estimate > limit else None
+        reason = (
+            "unknown_historical_cost"
+            if unknown_count
+            else ("limit_exceeded" if Decimal(used) + estimate > limit else None)
         )
         if reason:
             append_event(
@@ -247,6 +254,8 @@ def _reserve_budget(
             )
             return None, None
     return estimate, budget_checked_at
+
+
 def prepare_attempt(
     session: Session,
     *,
@@ -308,12 +317,8 @@ def prepare_attempt(
         budget_estimate_usd=budget_estimate,
         pricing_version=rate.pricing_version if rate else None,
         pricing_effective_at=rate.effective_from if rate else None,
-        input_rate_per_million=(
-            rate.input_rate_per_million if rate else None
-        ),
-        output_rate_per_million=(
-            rate.output_rate_per_million if rate else None
-        ),
+        input_rate_per_million=(rate.input_rate_per_million if rate else None),
+        output_rate_per_million=(rate.output_rate_per_million if rate else None),
     )
     session.add(record)
     session.flush()

@@ -78,7 +78,7 @@ class HTTPMetrics:
             )
             for index, bound in enumerate(self.BUCKETS):
                 lines.append(
-                    f'counterstrike_http_request_duration_seconds_bucket'
+                    f"counterstrike_http_request_duration_seconds_bucket"
                     f'{{{labels},le="{bound:g}"}} '
                     f"{buckets[index]}"
                 )

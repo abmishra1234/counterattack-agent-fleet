@@ -5,6 +5,7 @@ import urllib.request
 
 base = "http://127.0.0.1:8000/api/v1/inventory"
 
+
 def get(params):
     url = base + "?" + urllib.parse.urlencode(params)
     try:
@@ -12,6 +13,7 @@ def get(params):
             return response.status, json.loads(response.read())
     except urllib.error.HTTPError as error:
         return error.code, json.loads(error.read())
+
 
 status, page = get({"limit": 2})
 print("base", status, json.dumps(page, default=str)[:1600])

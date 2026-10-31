@@ -76,15 +76,12 @@ def score(
         max(
             0.0,
             sum(
-                breakdown[key]
-                for key in ("cvss", "kev", "internet_facing", "criticality", "epss")
+                breakdown[key] for key in ("cvss", "kev", "internet_facing", "criticality", "epss")
             ),
         ),
         2,
     )
-    prio, sla = priority_for(
-        total, kev=adv.in_kev is True, internet_facing=asset.internet_facing
-    )
+    prio, sla = priority_for(total, kev=adv.in_kev is True, internet_facing=asset.internet_facing)
     return total, prio, sla, breakdown
 
 
@@ -109,9 +106,8 @@ def score_agent(state: FleetState, *, settings: Settings | None = None) -> dict:
         observed_at = item.get("observed_at")
         if not isinstance(advisory_id, str) or not isinstance(value, dict):
             continue
-        if (
-            advisory_id not in epss_observed_at
-            or (isinstance(observed_at, str) and observed_at > epss_observed_at[advisory_id])
+        if advisory_id not in epss_observed_at or (
+            isinstance(observed_at, str) and observed_at > epss_observed_at[advisory_id]
         ):
             epss_by_advisory[advisory_id] = {
                 **value,

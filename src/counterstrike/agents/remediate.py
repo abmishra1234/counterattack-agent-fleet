@@ -106,10 +106,7 @@ def _impact_summary_is_grounded(
         or (in_kev is False and "not listed" not in lowered)
         or (
             in_kev is None
-            and (
-                "unknown" not in lowered
-                or re.search(r"\b(?:listed|not listed)\b", lowered)
-            )
+            and ("unknown" not in lowered or re.search(r"\b(?:listed|not listed)\b", lowered))
         )
     )
     if "kev" not in lowered or kev_conflict:
@@ -188,8 +185,7 @@ def _impact_provenance_evidence(
         else:
             fixture_result = "listed" if in_kev else "not_listed"
             detail = (
-                "source=fixture; file=kev.json; catalog_status=complete; "
-                f"result={fixture_result}"
+                f"source=fixture; file=kev.json; catalog_status=complete; result={fixture_result}"
             )
     else:
         status = kev_sync.get("status", "unknown")
@@ -225,11 +221,7 @@ def remediate_agent(state: FleetState, llm: LLMPort) -> dict:
     for i, s in enumerate(state["scored"], start=1):
         adv, asset = advs[s.advisory_id], assets[s.asset_id]
         kev_status = (
-            "listed"
-            if adv.in_kev is True
-            else "not_listed"
-            if adv.in_kev is False
-            else "unknown"
+            "listed" if adv.in_kev is True else "not_listed" if adv.in_kev is False else "unknown"
         )
         facts = {
             "cve_id": s.advisory_id,

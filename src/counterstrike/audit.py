@@ -68,9 +68,7 @@ def append_event(
             .on_conflict_do_nothing(index_elements=[AuditStreamHead.stream_name])
         )
         head = session.scalar(
-            select(AuditStreamHead)
-            .where(AuditStreamHead.stream_name == "global")
-            .with_for_update()
+            select(AuditStreamHead).where(AuditStreamHead.stream_name == "global").with_for_update()
         )
         if head is None:
             raise RuntimeError("The global audit stream head could not be initialized")
@@ -158,9 +156,8 @@ def verify_chain(session: Session) -> tuple[bool, str | None]:
         previous_hash = event.event_hash
         previous_sequence_number = event.sequence_number
     head = session.get(AuditStreamHead, "global")
-    if (
-        (head.last_hash if head else None) != previous_hash
-        or (head.sequence_number if head else 0) != previous_sequence_number
-    ):
+    if (head.last_hash if head else None) != previous_hash or (
+        head.sequence_number if head else 0
+    ) != previous_sequence_number:
         return False, "global-head"
     return True, None

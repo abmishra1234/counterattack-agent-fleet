@@ -11,9 +11,7 @@ depends_on = None
 
 def upgrade() -> None:
     op.add_column("outbox_messages", sa.Column("delivery_worker_id", sa.String(200)))
-    op.add_column(
-        "outbox_messages", sa.Column("delivery_started_at", sa.DateTime(timezone=True))
-    )
+    op.add_column("outbox_messages", sa.Column("delivery_started_at", sa.DateTime(timezone=True)))
     op.add_column(
         "outbox_messages",
         sa.Column("delivery_lease_expires_at", sa.DateTime(timezone=True)),

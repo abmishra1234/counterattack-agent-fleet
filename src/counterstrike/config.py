@@ -91,12 +91,7 @@ def _decode_llm_audit_key(encoded_key: str, setting_name: str) -> bytes:
 
 
 def _is_mailbox_address(value: str) -> bool:
-    if (
-        len(value) > 254
-        or any(char.isspace() for char in value)
-        or "\r" in value
-        or "\n" in value
-    ):
+    if len(value) > 254 or any(char.isspace() for char in value) or "\r" in value or "\n" in value:
         return False
     if value.count("@") != 1:
         return False
@@ -124,9 +119,7 @@ class Settings(BaseModel):
     local_dev_identity: str = Field(default="local-development", min_length=1, max_length=200)
     local_dev_role: Literal[
         "viewer", "analyst", "operator", "audit_reader", "llm_audit_reader", "admin"
-    ] = (
-        "operator"
-    )
+    ] = "operator"
     frontend_dir: Path = PROJECT_ROOT / "frontend"
     data_dir: Path = PROJECT_ROOT / "data"
     out_dir: Path = PROJECT_ROOT / "out"
@@ -398,18 +391,12 @@ class Settings(BaseModel):
         if (
             active_key
             and legacy_key
-            and _decode_llm_audit_key(
-                active_key, "LLM_AUDIT_ENCRYPTION_KEYRING_JSON"
-            )
+            and _decode_llm_audit_key(active_key, "LLM_AUDIT_ENCRYPTION_KEYRING_JSON")
             != _decode_llm_audit_key(legacy_key, "LLM_AUDIT_ENCRYPTION_KEY")
         ):
-            raise ValueError(
-                "LLM_AUDIT_ENCRYPTION_KEY conflicts with the active keyring version"
-            )
+            raise ValueError("LLM_AUDIT_ENCRYPTION_KEY conflicts with the active keyring version")
         if self.llm_audit_content_capture and not (active_key or legacy_key):
-            raise ValueError(
-                "LLM audit content capture requires a key for the active key version"
-            )
+            raise ValueError("LLM audit content capture requires a key for the active key version")
         if self.outbox_enqueue_enabled and (
             self.outbox_channel is None or self.outbox_recipient_map_json is None
         ):
@@ -664,9 +651,7 @@ def load_settings(dotenv_path: Path = DOTENV_PATH) -> Settings:
                 values.get("PUBLIC_FEED_SCHEDULER_ENABLED", "false"),
                 "PUBLIC_FEED_SCHEDULER_ENABLED",
             ),
-            public_feed_poll_interval_minutes=values.get(
-                "PUBLIC_FEED_POLL_INTERVAL_MINUTES", "15"
-            ),
+            public_feed_poll_interval_minutes=values.get("PUBLIC_FEED_POLL_INTERVAL_MINUTES", "15"),
             nvd_api_key=optional("NVD_API_KEY"),
             public_feed_timeout_seconds=values.get("PUBLIC_FEED_TIMEOUT_SECONDS", "20"),
             llm_provider=provider,

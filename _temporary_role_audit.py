@@ -5,9 +5,11 @@ import urllib.request
 
 base = "http://127.0.0.1:8002/api/v1"
 
+
 def get(path):
     with urllib.request.urlopen(base + path, timeout=5) as response:
         return response.status, json.loads(response.read())
+
 
 status, context = get("/auth/context")
 print("auth", status, context.get("role"))
