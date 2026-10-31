@@ -214,7 +214,10 @@ _DDL = (
         sequence_number INTEGER NOT NULL DEFAULT 0,
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )""",
-    "INSERT INTO audit_stream_heads(stream_name, last_hash, sequence_number) VALUES ('global', NULL, 0)",
+    (
+        "INSERT INTO audit_stream_heads(stream_name, last_hash, sequence_number) "
+        "VALUES ('global', NULL, 0)"
+    ),
     """CREATE TABLE llm_calls (
         id VARCHAR(36) PRIMARY KEY,
         request_id VARCHAR(64),
@@ -308,7 +311,10 @@ _DDL = (
     )""",
     "CREATE INDEX ix_advisories_canonical_id ON advisories(canonical_id)",
     "CREATE INDEX ix_advisories_modified_at ON advisories(modified_at)",
-    "CREATE INDEX ix_enrichment_advisory_kind_observed ON advisory_enrichments(advisory_id, kind, observed_at)",
+    (
+        "CREATE INDEX ix_enrichment_advisory_kind_observed "
+        "ON advisory_enrichments(advisory_id, kind, observed_at)"
+    ),
     "CREATE INDEX ix_inventory_snapshot_imported ON inventory_snapshots(imported_at)",
     "CREATE INDEX ix_inventory_component_version ON inventory_assets(component, version)",
     "CREATE INDEX ix_inventory_owner ON inventory_assets(owner)",
