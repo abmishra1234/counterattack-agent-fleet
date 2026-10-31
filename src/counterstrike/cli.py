@@ -8,9 +8,11 @@ import os
 import sys
 from pathlib import Path
 
+from counterstrike.config import read_dotenv
 from counterstrike.evaluate import evaluate, gate, scorecard_md
 from counterstrike.graph import run
 from counterstrike.llm import get_llm
+from counterstrike.config import read_dotenv
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--data", default="data")
     r.add_argument("--out", default="out")
     r.add_argument(
-        "--llm", default=os.environ.get("COUNTERSTRIKE_LLM", "fake"), choices=["fake", "gateway"]
+        "--llm", default=None, choices=["fake", "gateway"]
     )
 
     e = sub.add_parser("eval", help="score a run against gold labels and enforce the gate")
@@ -33,7 +35,22 @@ def main(argv: list[str] | None = None) -> int:
 
     args = p.parse_args(argv)
     if args.cmd == "run":
-        state = run(args.data, args.out, get_llm(args.llm))
+        dotenv = read_dotenv()
+        provider = args.llm or os.environ.get(
+            "LLM_PROVIDER",
+            os.environ.get(
+                "COUNTERSTRIKE_LLM",
+                dotenv.get("LLM_PROVIDER", dotenv.get("COUNTERSTRIKE_LLM", "fake")),
+            ),
+        )
+        if provider == "openai_compatible":
+            provider = "gateway"
+        try:
+            llm = get_llm(provider)
+        except RuntimeError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        state = run(args.data, args.out, llm)
         report = json.loads((Path(args.out) / "run_report.json").read_text(encoding="utf-8"))
         print(
             f"alerts={report['alerts']} by_priority={report['by_priority']} "

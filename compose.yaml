@@ -1,0 +1,114 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: counterstrike
+      POSTGRES_USER: counterstrike
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-counterstrike-local-only}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U counterstrike -d counterstrike"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  migrate:
+    build:
+      context: .
+    env_file:
+      - path: .env.example
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://counterstrike:${POSTGRES_PASSWORD:-counterstrike-local-only}@db:5432/counterstrike
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - app-network
+
+  api:
+    build:
+      context: .
+    env_file:
+      - path: .env.example
+      - path: .env
+        required: false
+    environment:
+      COUNTERSTRIKE_ENV: ${COUNTERSTRIKE_ENV:-development}
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      API_TRUSTED_LOCAL_CLIENT_CIDRS: ${COMPOSE_SUBNET:-172.16.240.0/24}
+      DATABASE_URL: postgresql+psycopg://counterstrike:${POSTGRES_PASSWORD:-counterstrike-local-only}@db:5432/counterstrike
+      DATA_DIR: /app/data
+      OUT_DIR: /app/out
+      FRONTEND_DIR: /app/frontend
+      LLM_PROVIDER: ${LLM_PROVIDER:-fake}
+      LLM_LIVE_CALLS_ENABLED: ${LLM_LIVE_CALLS_ENABLED:-false}
+    command: ["counterstrike-api"]
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    volumes:
+      - output-data:/app/out
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  worker:
+    build:
+      context: .
+    env_file:
+      - path: .env.example
+      - path: .env
+        required: false
+    environment:
+      COUNTERSTRIKE_ENV: ${COUNTERSTRIKE_ENV:-development}
+      DATABASE_URL: postgresql+psycopg://counterstrike:${POSTGRES_PASSWORD:-counterstrike-local-only}@db:5432/counterstrike
+      DATA_DIR: /app/data
+      OUT_DIR: /app/out
+      LLM_PROVIDER: ${LLM_PROVIDER:-fake}
+      LLM_LIVE_CALLS_ENABLED: ${LLM_LIVE_CALLS_ENABLED:-false}
+      WORKER_ID: ${WORKER_ID:-counterstrike-worker-1}
+    command: ["counterstrike-worker"]
+    volumes:
+      - output-data:/app/out
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    networks:
+      - app-network
+
+volumes:
+  postgres-data:
+  output-data:
+
+networks:
+  app-network:
+    ipam:
+      config:
+        - subnet: ${COMPOSE_SUBNET:-172.16.240.0/24}

@@ -19,12 +19,28 @@ python -m counterstrike eval --out out                       # gate: exits 1 on 
 pytest --cov=counterstrike
 ```
 
-Live model (any OpenAI-compatible gateway):
+## Local API and dashboard
+
+The API serves the dashboard from the same origin. For a database-backed local workspace, use the Docker Compose stack below. A bare API process can serve liveness/readiness and the temporary fixture compatibility route without a database, but database-backed dashboard, run, review, and usage routes require PostgreSQL and Alembic migrations.
+
+### Docker Compose stack
 
 ```bash
-export LLM_BASE_URL=https://<gateway>/v1 LLM_API_KEY=... LLM_MODEL=<model>
-python -m counterstrike run --llm gateway --out out-llm
+cp .env.example .env
+docker compose up --build -d
+docker compose ps
 ```
+
+Open `http://127.0.0.1:8000`. Compose starts PostgreSQL, applies migrations, then starts the API and worker. The database has no host-published port; the API is published on host loopback only. The default LLM provider remains `fake`, and live calls remain off. To inspect service logs or stop the stack:
+
+```bash
+docker compose logs -f api worker
+docker compose down
+```
+
+`POSTGRES_PASSWORD` in `.env.example` is a local-demo value; replace it for local use and supply secrets through a deployment secret store outside the demo. The default Compose subnet is `172.16.240.0/24`; if it conflicts with an existing network, set `COMPOSE_SUBNET` to a free private CIDR. `API_TRUSTED_LOCAL_CLIENT_CIDRS` is configured for that private bridge only by Compose, while the host port remains bound to `127.0.0.1`; production settings reject this development exception. Track runtime acceptance in `planning/BACKEND_IMPLEMENTATION_TRACKER.md`.
+
+The OpenAI-compatible adapter now requires a persisted run ID and commits the encrypted request and pending attempt before network dispatch. Live calls remain off by default. Enabling them requires provider configuration, `DATABASE_URL`, encrypted artifact capture and retention settings, and explicit `LLM_DATA_BOUNDARY_APPROVED=true` and `LLM_ARTIFACT_RETENTION_APPROVED=true`. Provider/data policy, access roles, spend enforcement, migration, and runtime acceptance are still pending. Keep `LLM_PROVIDER=fake` for offline runs.
 
 ## Outputs (`out/`)
 
@@ -46,7 +62,8 @@ src/counterstrike/
   agents/          ingest, extract, correlate, score, remediate
   dispatch.py      outbox writer
   graph.py         LangGraph wiring (conditional edges)
-  llm.py           LLMPort, FakeLLM, GatewayLLM
+  llm.py           LLMPort, FakeLLM, audited gateway adapter
+  llm_metering.py  Per-attempt request/response capture and token/cost records
   guards.py        injection detection, grounding checks
   versions.py      tolerant version parsing, PEP 440 ranges
   evaluate.py      metrics + release gate

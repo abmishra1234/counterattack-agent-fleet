@@ -7,6 +7,7 @@ is schema-validated and grounding-checked; anything that fails is routed to a hu
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 from pydantic import ValidationError
@@ -17,6 +18,7 @@ from counterstrike.models import AffectedProduct, ExtractedAdvisory, FleetState,
 from counterstrike.versions import parse_spec
 
 PROMPT_VERSION = "extract_v1"
+logger = logging.getLogger("counterstrike.agent.extract")
 
 SYSTEM = """You extract affected-software facts from ONE security bulletin.
 Rules:
@@ -81,9 +83,33 @@ def extract_agent(state: FleetState, llm: LLMPort) -> dict:
             f"<advisory_id>{adv.id}</advisory_id>\n{wrap_untrusted(adv.text)}"
         )
         llm_calls += 1
-        raw = llm.complete(
-            "extract", SYSTEM, user, context={"text": adv.text, "vocabulary": vocabulary}
-        )
+        try:
+            raw = llm.complete(
+                "extract",
+                SYSTEM,
+                user,
+                context={
+                    "text": adv.text,
+                    "vocabulary": vocabulary,
+                    "_counterstrike_audit": {
+                        "prompt_version": PROMPT_VERSION,
+                        "advisory_id": adv.id,
+                    },
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "Extraction model call failed; routing advisory to review",
+                extra={"event": "agent.extract.call_failed", "task": "extract", "advisory_id": adv.id, "error_code": type(exc).__name__},
+            )
+            human.append(
+                NeedsHuman(
+                    advisory_id=adv.id,
+                    stage="extract",
+                    reason=f"model provider failed: {type(exc).__name__}",
+                )
+            )
+            continue
         try:
             payload = json.loads(raw)
             products = [AffectedProduct.model_validate(p) for p in payload.get("products", [])]

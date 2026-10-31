@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       llm_smoke:
-        description: "Also run the fleet against the real LLM gateway"
+        description: "Live calls are temporarily gated until prompt/response audit and metering are ready"
         type: boolean
         default: false
 
@@ -83,8 +83,8 @@ jobs:
           retention-days: 14
 
   llm-smoke:
-    # Manual only: costs tokens and needs gateway credentials stored as repo secrets.
-    if: github.event_name == 'workflow_dispatch' && inputs.llm_smoke
+    # Manual only: the deployment owner enables this after audited request/response storage ships.
+    if: github.event_name == 'workflow_dispatch' && inputs.llm_smoke && vars.COUNTERSTRIKE_AUDITED_LLM_READY == 'true'
     needs: eval-gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -109,3 +109,10 @@ jobs:
         with:
           name: counterstrike-outbox-llm
           path: out-llm/
+
+  llm-smoke-gated:
+    if: github.event_name == 'workflow_dispatch' && inputs.llm_smoke && vars.COUNTERSTRIKE_AUDITED_LLM_READY != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain why no live request was sent
+        run: echo "Live LLM smoke was not run. Enable COUNTERSTRIKE_AUDITED_LLM_READY only after encrypted prompt/response audit, usage metering, and access controls are implemented and approved."

@@ -14,14 +14,100 @@ const escapeHtml = (value = '') => String(value).replace(/[&<>"']/g, (char) => (
 const niceDate = (value) => value ? new Date(value).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'Not recorded';
 const friendlyName = (value = '') => value.split(/[-_]/).map((part) => part ? part[0].toUpperCase() + part.slice(1) : '').join(' ');
 const priorityClass = (priority = 'P4') => `priority-${priority}`;
-const sourceLabel = (advisory) => advisory?.source === 'nvd' ? 'NVD fixture' : advisory?.source === 'vendor_bulletin' ? 'Vendor bulletin fixture' : 'Local fixture';
+const sourceLabel = (advisory) => advisory?.source ? friendlyName(advisory.source) : 'Source unavailable';
+
+async function apiRequest(path, options = {}) {
+  const response = await fetch(path, { cache: 'no-store', ...options });
+  let body;
+  try { body = await response.json(); }
+  catch { body = null; }
+  return { response, body };
+}
+
+async function apiGet(path) {
+  const { response, body } = await apiRequest(path);
+  if (!response.ok) throw new Error(body?.error?.message || `Request failed (${response.status})`);
+  return body;
+}
+
+async function apiPost(path, payload, headers = {}) {
+  const requestHeaders = { ...headers };
+  const options = { method: 'POST', headers: requestHeaders };
+  if (payload !== undefined) {
+    requestHeaders['Content-Type'] = 'application/json';
+    options.body = JSON.stringify(payload);
+  }
+  const { response, body } = await apiRequest(path, options);
+  if (!response.ok) throw new Error(body?.error?.message || `Request failed (${response.status})`);
+  return body;
+}
+
+async function apiCollection(path) {
+  const items = [];
+  let offset = 0;
+  let total = 0;
+  do {
+    const separator = path.includes('?') ? '&' : '?';
+    const result = await apiGet(`${path}${separator}limit=100&offset=${offset}`);
+    items.push(...(result.items || []));
+    total = Number(result.total ?? items.length);
+    const pageSize = Number(result.limit || 100);
+    if (!pageSize) break;
+    offset += pageSize;
+  } while (offset < total);
+  return items;
+}
 
 async function loadData() {
   try {
-    const response = await fetch('/api/data', { cache: 'no-store' });
-    if (!response.ok) throw new Error(`API returned ${response.status}`);
-    model = await response.json();
-    document.querySelector('#top-run-status').textContent = model.lastRun ? `Latest run · ${model.lastRun}` : 'No run recorded';
+    const [context, dashboard, alerts] = await Promise.all([
+      apiGet('/api/v1/auth/context'),
+      apiGet('/api/v1/dashboard'),
+      apiCollection('/api/v1/alerts'),
+    ]);
+    const optional = await Promise.allSettled([
+      context.capabilities.includes('review') ? apiCollection('/api/v1/reviews?state=open') : Promise.resolve([]),
+      apiGet('/api/v1/sources'),
+      apiRequest('/api/v1/health/ready'),
+      dashboard.latest_run ? apiGet(`/api/v1/runs/${encodeURIComponent(dashboard.latest_run.id)}`) : Promise.resolve(null),
+    ]);
+    const partialErrors = [];
+    const readOptional = (index, label, fallback) => {
+      const result = optional[index];
+      if (result.status === 'fulfilled') return result.value;
+      partialErrors.push(`${label}: ${result.reason?.message || 'unavailable'}`);
+      return fallback;
+    };
+    const reviews = readOptional(0, 'Review queue', []);
+    const sourceResponse = readOptional(1, 'Sources', { items: [] });
+    const readinessResult = readOptional(2, 'Readiness', { body: { status: 'unknown', checks: {} } });
+    const runDetail = readOptional(3, 'Latest run detail', null);
+    const latestRun = dashboard.latest_run;
+    const report = latestRun ? {
+      ...(runDetail?.summary || latestRun.summary || {}),
+      trace: runDetail?.trace || [],
+      status: latestRun.status,
+    } : null;
+    const mappedAlerts = alerts.map((item) => ({ ...item, alert_id: item.id, asset_id: item.asset_key }));
+    model = {
+      alerts: mappedAlerts,
+      needsHuman: reviews,
+      sources: sourceResponse.items || [],
+      readiness: readinessResult.body || { status: 'unknown', checks: {} },
+      report,
+      lastRun: latestRun ? niceDate(latestRun.completed_at || latestRun.created_at) : null,
+      capabilities: context.capabilities || [],
+      dataMode: context.data_mode || 'unknown',
+      persistenceMode: context.persistence_mode || 'unknown',
+      llmProvider: context.llm_provider || 'unknown',
+      llmLiveCallsEnabled: Boolean(context.llm_live_calls_enabled),
+      partialErrors,
+    };
+    document.querySelectorAll('.nav-item[data-page="review"]').forEach((item) => {
+      item.hidden = !model.capabilities.includes('review');
+    });
+    if (activePage === 'review' && !model.capabilities.includes('review')) activePage = 'overview';
+    document.querySelector('#top-run-status').textContent = model.lastRun ? `Latest run: ${model.lastRun}` : 'No run recorded';
     document.querySelector('.status-dot').classList.toggle('warning-dot', !model.lastRun);
     document.querySelector('#nav-alert-count').textContent = model.alerts.length;
     document.querySelector('#nav-review-count').textContent = model.needsHuman.length;
@@ -29,10 +115,10 @@ async function loadData() {
     const initialHash = location.hash.slice(1);
     if (initialHash.startsWith('alert/')) openAlert(decodeURIComponent(initialHash.slice(6)));
   } catch (error) {
-    app.innerHTML = `<section class="error-state"><div><div class="empty-icon">!</div><strong>Could not load preview data</strong><p>${escapeHtml(error.message)}. Run the Counterstrike CLI first, then refresh this page.</p><code>python -m counterstrike run --data data --out out</code></div></section>`;
+    app.innerHTML = `<section class="error-state"><div><div class="empty-icon">!</div><strong>Could not load the workspace</strong><p>${escapeHtml(error.message)} Check the API and database status, then retry.</p><button class="button" id="retry-load" type="button">Retry</button></div></section>`;
+    document.querySelector('#retry-load')?.addEventListener('click', loadData);
   }
 }
-
 function render() {
   document.querySelectorAll('.nav-item').forEach((item) => item.classList.toggle('active', item.dataset.page === activePage));
   const crumb = document.querySelector('#crumb-page');
@@ -41,6 +127,9 @@ function render() {
   else if (activePage === 'review') renderReview();
   else if (activePage === 'health') renderHealth();
   else { activePage = 'overview'; renderOverview(); }
+  if (model.partialErrors?.length) {
+    app.insertAdjacentHTML('afterbegin', `<div class="banner"><div class="banner-content"><span class="banner-icon">!</span><span><strong>Some workspace details are unavailable.</strong> ${escapeHtml(model.partialErrors.join(' | '))}</span></div></div>`);
+  }
 }
 
 function pageHeading(eyebrow, title, description, actions = '') {
@@ -89,7 +178,7 @@ function alertRows(items) {
 }
 
 function alertsTable(items, compact = false) {
-  return `<div class="table-wrap"><table><thead><tr><th>Priority</th><th>Advisory</th><th>Component</th><th>Service / asset</th><th>Owner</th><th>Assessment</th></tr></thead><tbody>${alertRows(items)}</tbody></table></div>${compact ? `<div class="table-foot"><span>Showing ${items.length} affected assets in this run</span><a href="#alerts" data-go="alerts">View all alerts <span class="arrow">→</span></a></div>` : `<div class="table-foot"><span>Preview data · ${items.length} results</span><span>Sorted by priority and risk score</span></div>`}`;
+  return `<div class="table-wrap"><table><thead><tr><th>Priority</th><th>Advisory</th><th>Component</th><th>Service / asset</th><th>Owner</th><th>Assessment</th></tr></thead><tbody>${alertRows(items)}</tbody></table></div>${compact ? `<div class="table-foot"><span>Showing ${items.length} affected assets in this run</span><a href="#alerts" data-go="alerts">View all alerts <span class="arrow">→</span></a></div>` : `<div class="table-foot"><span>API-backed results · ${items.length} items</span><span>Sorted by priority and risk score</span></div>`}`;
 }
 
 function renderOverview() {
@@ -99,7 +188,12 @@ function renderOverview() {
   const remaining = ranked.slice(1, 4);
   const p1Count = model.alerts.filter((a) => a.priority === 'P1').length;
   const scanCount = report?.trace?.find((x) => x.agent === 'ingest')?.assets ?? '—';
-  app.innerHTML = `${pageHeading('SECURITY WORKSPACE', 'Good morning', 'Your latest local run, prioritized for a quick review.', '<span class="scope-pill">Latest run</span>')}
+  const runAction = model.capabilities.includes('run')
+    ? '<button class="button" id="start-run" type="button">Start analysis</button>'
+    : '<span class="scope-pill">Latest run</span>';
+  const modeLabel = `Input: ${model.dataMode} | Persistence: ${model.persistenceMode} | LLM: ${model.llmProvider} | live calls ${model.llmLiveCallsEnabled ? 'enabled' : 'gated'}`;
+  app.innerHTML = `${pageHeading('SECURITY WORKSPACE', 'Good morning', 'Your latest local run, prioritized for a quick review.', runAction)}
+    <div class="page-description">${escapeHtml(modeLabel)}</div>
     <section class="overview-hero-grid" aria-label="Today overview">
       <article class="featured-alert">
         <div class="featured-eyebrow"><span class="featured-star">✦</span> HIGHEST PRIORITY · ${featured ? escapeHtml(featured.priority) : 'CLEAR'}</div>
@@ -108,16 +202,51 @@ function renderOverview() {
         ${featured ? `<div class="featured-meta"><span>${escapeHtml(featured.service)}</span><span>${escapeHtml(featured.component)} ${escapeHtml(featured.installed_version)}</span><span>Owner · ${escapeHtml(featured.owner)}</span></div><div class="featured-actions"><button class="button featured-button" type="button" data-featured-alert="${escapeHtml(featured.alert_id)}">Review finding <span aria-hidden="true">→</span></button><span class="featured-hint">${escapeHtml(featured.sla_hours)}h response target</span></div>` : ''}
       </article>
       <div class="overview-side-stack">
-        <article class="overview-stat-card run-stat-card"><div class="overview-card-top"><span class="overview-card-icon run-icon">✓</span><span class="card-kicker">LATEST RUN</span>${statusBadge('Completed', 'healthy')}</div><strong>${escapeHtml(model.lastRun || 'Time not recorded')}</strong><p>${report?.advisories_ingested ?? 0} advisories checked · ${report?.matches ?? 0} matches</p><a href="#health" data-go="health" class="panel-link">View run details <span class="arrow">→</span></a></article>
+        <article class="overview-stat-card run-stat-card"><div class="overview-card-top"><span class="overview-card-icon run-icon">✓</span><span class="card-kicker">LATEST RUN</span>${statusBadge(friendlyName(report?.status || 'No run'), report?.status === 'succeeded' ? 'healthy' : 'review')}</div><strong>${escapeHtml(model.lastRun || 'Time not recorded')}</strong><p>${report?.advisories_ingested ?? 0} advisories checked · ${report?.matches ?? 0} matches</p><a href="#health" data-go="health" class="panel-link">View run details <span class="arrow">→</span></a></article>
         <article class="overview-stat-card"><div class="overview-card-top"><span class="overview-card-icon review-icon">◎</span><span class="card-kicker">HUMAN REVIEW</span></div><div class="review-stat-line"><strong>${model.needsHuman.length}</strong><span>item${model.needsHuman.length === 1 ? '' : 's'} need attention</span></div><p>Uncertain advisories stay in the review queue.</p><a href="#review" data-go="review" class="panel-link">Open review queue <span class="arrow">→</span></a></article>
       </div>
     </section>
     <section class="overview-lower-grid">
       <article class="panel today-panel"><div class="panel-header"><div><div class="panel-title">Also in this run</div><div class="panel-subtitle">A short list of other confirmed affected assets</div></div><a class="panel-link" href="#alerts" data-go="alerts">All ${model.alerts.length} findings →</a></div>${remaining.length ? `<div class="finding-list">${remaining.map((item) => `<button class="finding-row" type="button" data-featured-alert="${escapeHtml(item.alert_id)}"><span class="finding-priority ${priorityClass(item.priority)}">${escapeHtml(item.priority)}</span><span class="finding-main"><strong>${escapeHtml(item.cve_id)} <span>· ${escapeHtml(item.component)}</span></strong><small>${escapeHtml(item.service)} · ${escapeHtml(item.owner)}</small></span><span class="finding-score">${Number(item.risk_score).toFixed(1)}<small>risk</small></span><span class="finding-arrow">→</span></button>`).join('')}</div>` : '<div class="empty-inline">No additional findings in this run.</div>'}</article>
-      <article class="panel posture-panel"><div class="panel-header"><div><div class="panel-title">Run snapshot</div><div class="panel-subtitle">Local fixture data</div></div><span class="snapshot-count">${model.alerts.length}</span></div><div class="snapshot-total"><strong>${model.alerts.length}</strong><span>affected assets</span></div><div class="priority-chart snapshot-chart">${priorityChart()}</div><div class="snapshot-footer"><span>${scanCount} inventory assets scanned</span><span>${p1Count} P1</span></div></article>
+      <article class="panel posture-panel"><div class="panel-header"><div><div class="panel-title">Run snapshot</div><div class="panel-subtitle">Latest persisted run</div></div><span class="snapshot-count">${model.alerts.length}</span></div><div class="snapshot-total"><strong>${model.alerts.length}</strong><span>affected assets</span></div><div class="priority-chart snapshot-chart">${priorityChart()}</div><div class="snapshot-footer"><span>${scanCount} inventory assets scanned</span><span>${p1Count} P1</span></div></article>
     </section>`;
   bindPageLinks();
   document.querySelectorAll('[data-featured-alert]').forEach((button) => button.addEventListener('click', () => openAlert(button.dataset.featuredAlert)));
+  document.querySelector('#start-run')?.addEventListener('click', startManualRun);
+}
+
+async function startManualRun(event) {
+  const button = event.currentTarget;
+  button.disabled = true;
+  const status = document.querySelector('#top-run-status');
+  const idempotencyKey = globalThis.crypto?.randomUUID?.()
+    || `manual-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    status.textContent = 'Queueing analysis...';
+    const accepted = await apiPost('/api/v1/runs', undefined, { 'Idempotency-Key': idempotencyKey });
+    const runId = accepted.run_id || accepted.run?.id;
+    if (!runId) throw new Error('The API accepted the run without returning its ID.');
+    toast(accepted.deduplicated ? 'Existing analysis run resumed' : 'Analysis queued');
+    status.textContent = `Analysis ${accepted.run?.status || 'queued'} · ${runId}`;
+    for (let attempt = 0; attempt < 90; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      const run = await apiGet(`/api/v1/runs/${encodeURIComponent(runId)}`);
+      status.textContent = `Analysis ${run.status} · ${runId}`;
+      if (['succeeded', 'failed', 'partial'].includes(run.status)) {
+        toast(run.status === 'succeeded' ? 'Analysis completed' : `Analysis ${run.status}`);
+        await loadData();
+        return;
+      }
+    }
+    status.textContent = `Analysis still running · ${runId}`;
+    toast('Analysis is still running; check Run health for updates');
+  } catch (error) {
+    status.textContent = 'Analysis request failed';
+    toast(error.message || 'Could not start analysis');
+  } finally {
+    const currentButton = document.querySelector('#start-run');
+    if (currentButton) currentButton.disabled = false;
+  }
 }
 
 function renderAlerts() {
@@ -127,7 +256,7 @@ function renderAlerts() {
     const searchText = [alert.cve_id, alert.asset_id, alert.service, alert.component, alert.owner].join(' ').toLowerCase();
     return matchesPriority && matchesOwner && searchText.includes(query.trim().toLowerCase());
   });
-  app.innerHTML = `${pageHeading('WORKSPACE / ALERTS', 'Affected assets', 'Review each confirmed match, its priority and the evidence used by the prototype.', '<span class="feed-mode">LOCAL RUN</span>')}
+  app.innerHTML = `${pageHeading('WORKSPACE / ALERTS', 'Affected assets', 'Review each confirmed match, its priority and the evidence used by the latest run.', '<span class="feed-mode">LATEST RUN</span>')}
     <div class="page-toolbar"><label class="searchbox"><span aria-hidden="true">⌕</span><input id="alert-search" type="search" placeholder="Search CVE, product, service or owner" value="${escapeHtml(query)}" aria-label="Search alerts"></label><select class="select-control" id="owner-filter" aria-label="Filter by owner"><option value="all">All owners</option>${[...new Set(model.alerts.map((a) => a.owner))].sort().map((owner) => `<option value="${escapeHtml(owner)}" ${ownerFilter === owner ? 'selected' : ''}>${escapeHtml(owner)}</option>`).join('')}</select><button class="button small" id="clear-filters">Clear filters</button></div>
     <div class="filter-chips" aria-label="Filter by priority">${['All', 'P1', 'P2', 'P3', 'P4'].map((p) => `<button class="filter-chip ${priorityFilter === p ? 'active' : ''}" data-priority="${p}">${p === 'All' ? 'All priorities' : p}<span class="chip-count">${p === 'All' ? model.alerts.length : model.alerts.filter((a) => a.priority === p).length}</span></button>`).join('')}</div>
     <article class="panel table-panel"><div class="panel-header"><div class="panel-title">Affected asset list</div><span class="table-caption" id="results-count">${items.length} results</span></div><div id="alerts-table">${alertsTable(items)}</div></article>`;
@@ -154,36 +283,58 @@ function updateAlertsTable() {
 function renderReview() {
   const items = model.needsHuman;
   if (!items.length) {
-    app.innerHTML = `${pageHeading('WORKSPACE / REVIEW', 'Needs review', 'Advisories the fleet could not safely resolve from the available evidence.')}<article class="panel"><div class="empty-state"><div><div class="empty-icon">✓</div><strong>No advisories need review</strong><p>Unclear or ungrounded items from the latest run will appear here.</p></div></div></article>`;
+    app.innerHTML = `${pageHeading('WORKSPACE / REVIEW', 'Needs review', 'Advisories the fleet could not safely resolve from the available evidence.')}<article class="panel"><div class="empty-state"><div><div class="empty-icon">!</div><strong>No advisories need review</strong><p>Unclear or ungrounded items from the latest run will appear here.</p></div></div></article>`;
     return;
   }
   selectedReview = Math.min(selectedReview, items.length - 1);
   const item = items[selectedReview];
-  const advisory = model.advisories.find((a) => a.id === item.advisory_id);
+  const evidence = item.source_evidence || {};
+  const decisionHistory = (item.decisions || []).map((decision) => `<div class="decision-history-row"><strong>${escapeHtml(friendlyName(decision.disposition))}</strong> - ${escapeHtml(decision.actor_id)} - ${escapeHtml(niceDate(decision.created_at))}<p>${escapeHtml(decision.note || '')}</p></div>`).join('');
   app.innerHTML = `${pageHeading('WORKSPACE / REVIEW QUEUE', 'Needs review', 'The fleet leaves uncertain cases for a human instead of guessing.', `<span class="state-badge review">${items.length} open item${items.length === 1 ? '' : 's'}</span>`)}
-    <div class="review-layout"><article class="panel"><div class="panel-header"><div class="panel-title">Review queue</div><span class="table-caption">${items.length} item${items.length === 1 ? '' : 's'}</span></div><div class="review-list">${items.map((entry, index) => `<button class="review-item ${index === selectedReview ? 'selected' : ''}" data-review-index="${index}"><div class="review-item-top"><strong>${escapeHtml(entry.advisory_id)}</strong><small>Extract stage</small></div><div class="review-item-title">${escapeHtml(model.advisories.find((a) => a.id === entry.advisory_id)?.title || 'Advisory details unavailable')}</div><div class="review-item-reason">${escapeHtml(entry.reason)}</div></button>`).join('')}</div></article>
-    <article class="panel review-detail"><div class="review-detail-header">${statusBadge('Human review required', 'review')}<h2>${escapeHtml(item.advisory_id)}</h2><p class="lead">${escapeHtml(advisory?.title || 'Advisory details unavailable')}</p></div><div class="review-callout"><strong>Why it was held:</strong> ${escapeHtml(item.reason)} The system did not produce a confirmed affected-product and version-range match.</div><div class="review-section-title">Source bulletin</div><div class="bulletin">${escapeHtml(advisory?.text || 'Source text is not available in the fixture.')}</div><div class="review-section-title">Available context</div><div class="source-list-inline"><span class="tag">Source: ${escapeHtml(sourceLabel(advisory))}</span><span class="tag">Published: ${escapeHtml(advisory?.published || 'Unknown')}</span><span class="tag">CVSS: ${advisory?.cvss ?? 'Not provided'}</span></div><div class="review-note"><span aria-hidden="true">i</span><span><strong>Read-only preview.</strong> Review decisions are not saved in this frontend. No owner alert has been created for this advisory.</span></div></article></div>`;
+    <div class="review-layout"><article class="panel"><div class="panel-header"><div class="panel-title">Review queue</div><span class="table-caption">${items.length} item${items.length === 1 ? '' : 's'}</span></div><div class="review-list">${items.map((entry, index) => `<button class="review-item ${index === selectedReview ? 'selected' : ''}" data-review-index="${index}"><div class="review-item-top"><strong>${escapeHtml(entry.cve_id || entry.advisory_id)}</strong><small>${escapeHtml(friendlyName(entry.stage))}</small></div><div class="review-item-title">${escapeHtml(entry.title || 'Advisory details unavailable')}</div><div class="review-item-reason">${escapeHtml(entry.reason)}</div></button>`).join('')}</div></article>
+    <article class="panel review-detail"><div class="review-detail-header">${statusBadge('Human review required', 'review')}<h2>${escapeHtml(item.cve_id || item.advisory_id)}</h2><p class="lead">${escapeHtml(item.title || 'Advisory details unavailable')}</p></div><div class="review-callout"><strong>Why it was held:</strong> ${escapeHtml(item.reason)} The system did not produce a confirmed affected-product and version-range match.</div><div class="review-section-title">Source bulletin</div><div class="bulletin">${escapeHtml(evidence.text || 'Source text is not available.')}</div><div class="review-section-title">Available context</div><div class="source-list-inline"><span class="tag">Source: ${escapeHtml(sourceLabel(evidence))}</span><span class="tag">Published: ${escapeHtml(evidence.published || 'Unknown')}</span><span class="tag">CVSS: ${evidence.cvss ?? 'Not provided'}</span></div><div class="review-section-title">Decision history</div>${decisionHistory || '<p class="page-description">No decisions have been recorded for this case.</p>'}<form id="review-decision-form" class="review-decision-form"><strong>Record an analyst decision</strong><label class="field-label" for="review-disposition">Disposition</label><select id="review-disposition" class="select-control" required><option value="affected_confirmed">Affected confirmed</option><option value="possible_match">Possible match</option><option value="not_affected">Not affected</option><option value="insufficient_evidence">Insufficient evidence</option></select><label class="field-label" for="review-note-input">Decision note</label><textarea id="review-note-input" class="text-input" minlength="1" maxlength="2000" required></textarea><button class="button small" type="submit">Save audited decision</button></form></article></div>`;
   document.querySelectorAll('[data-review-index]').forEach((button) => button.addEventListener('click', () => { selectedReview = Number(button.dataset.reviewIndex); renderReview(); }));
+  document.querySelector('#review-decision-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    button.disabled = true;
+    try {
+      await apiPost(`/api/v1/reviews/${encodeURIComponent(item.id)}/decision`, {
+        disposition: document.querySelector('#review-disposition').value,
+        note: document.querySelector('#review-note-input').value,
+      });
+      toast('Decision saved to the audit trail');
+      await loadData();
+    } catch (error) {
+      toast(error.message || 'Could not save decision');
+      button.disabled = false;
+    }
+  });
 }
 
 function renderHealth() {
   const report = model.report;
   const trace = report?.trace || [];
-  const fixtureSources = [
-    { key: 'NVD', file: 'advisories.json', count: model.advisories.length, note: 'Synthetic advisory and vendor bulletin fixture records' },
-    { key: 'KEV', file: 'kev.json', count: model.kev?.cve_ids?.length || 0, note: 'Synthetic KEV-style identifiers' },
-    { key: 'Inventory', file: 'inventory.json', count: model.inventory.length, note: 'Local sample asset inventory' },
-  ];
-  app.innerHTML = `${pageHeading('WORKSPACE / RUN HEALTH', 'Run health', 'Inspect what the latest local execution processed and where the data came from.', '<span class="feed-mode">● FIXTURE INPUTS</span>')}
-    <section class="health-summary"><article class="panel health-card"><div class="health-card-label">LATEST EXECUTION</div><div class="health-card-value">${model.lastRun ? escapeHtml(model.lastRun) : 'Time unavailable'}</div><div class="health-card-note">Local output files · no scheduler attached</div></article><article class="panel health-card"><div class="health-card-label">PIPELINE RESULT</div><div class="health-card-value"><span class="state-badge healthy">Completed</span></div><div class="health-card-note">${report?.advisories_ingested ?? 0} advisories processed</div></article><article class="panel health-card"><div class="health-card-label">HUMAN REVIEW</div><div class="health-card-value">${report?.needs_human ?? 0} item${report?.needs_human === 1 ? '' : 's'}</div><div class="health-card-note">Unresolved extraction cases</div></article></section>
-    <article class="panel" style="margin-bottom:15px"><div class="panel-header"><div><div class="panel-title">Pipeline stages</div><div class="panel-subtitle">Agent counts and timings from run_report.json</div></div><span class="mono-label">${trace.length} stages recorded</span></div><div class="pipeline">${trace.map((stage) => `<div class="pipeline-step"><span class="pipeline-circle">✓</span><strong>${escapeHtml(friendlyName(stage.agent))}</strong><small>${stage.ms ?? '—'} ms</small></div>`).join('')}</div></article>
-    <article class="panel" style="margin-bottom:15px"><div class="panel-header"><div><div class="panel-title">Input sources</div><div class="panel-subtitle">These are local fixtures, not live integrations</div></div></div><div class="source-list">${fixtureSources.map((source) => `<div class="source-card"><div class="source-card-head"><span class="source-symbol">${escapeHtml(source.key.slice(0,3).toUpperCase())}</span>${escapeHtml(source.key)}<span class="state-badge healthy" style="margin-left:auto">Loaded</span></div><p><span class="mono">${escapeHtml(source.file)}</span> · ${source.count} records<br>${escapeHtml(source.note)}</p></div>`).join('')}</div></article>
+  const readiness = model.readiness || { status: 'unknown', checks: {} };
+  const sourceCards = model.sources.length ? model.sources.map((source) => {
+    const state = source.last_status || (source.enabled ? 'Waiting for first poll' : 'Disabled');
+    const kind = source.last_status === 'success' ? 'healthy' : source.enabled ? 'review' : 'healthy';
+    return `<div class="source-card"><div class="source-card-head"><span class="source-symbol">${escapeHtml(source.name.slice(0, 3).toUpperCase())}</span>${escapeHtml(source.name)}<span class="state-badge ${kind}" style="margin-left:auto">${escapeHtml(state)}</span></div><p>${escapeHtml(friendlyName(source.source_type))}<br>${source.last_success_at ? `Last success ${escapeHtml(niceDate(source.last_success_at))}` : 'No successful poll recorded'}${source.last_error_code ? `<br>Error: ${escapeHtml(source.last_error_code)}` : ''}</p></div>`;
+  }).join('') : '<div class="empty-inline">No configured sources are registered.</div>';
+  const checkCards = Object.entries(readiness.checks || {}).map(([name, state]) => `<span class="tag">${escapeHtml(friendlyName(name))}: ${escapeHtml(state)}</span>`).join('');
+  const runState = report?.status || 'No run recorded';
+  const runKind = ['succeeded', 'completed'].includes(String(runState).toLowerCase()) ? 'healthy' : 'review';
+  app.innerHTML = `${pageHeading('WORKSPACE / RUN HEALTH', 'Run health', 'Inspect the latest persisted execution, configured sources and service readiness.', `<span class="feed-mode">${escapeHtml(String(readiness.status || 'unknown').toUpperCase())}</span>`)}
+    <section class="health-summary"><article class="panel health-card"><div class="health-card-label">LATEST EXECUTION</div><div class="health-card-value">${model.lastRun ? escapeHtml(model.lastRun) : 'Time unavailable'}</div><div class="health-card-note">Persisted run history</div></article><article class="panel health-card"><div class="health-card-label">PIPELINE RESULT</div><div class="health-card-value">${statusBadge(friendlyName(runState), runKind)}</div><div class="health-card-note">${report?.advisories_ingested ?? 0} advisories processed</div></article><article class="panel health-card"><div class="health-card-label">HUMAN REVIEW</div><div class="health-card-value">${report?.needs_human ?? 0} items</div><div class="health-card-note">Cases opened by latest run</div></article></section>
+    <article class="panel" style="margin-bottom:15px"><div class="panel-header"><div><div class="panel-title">Service checks</div><div class="panel-subtitle">Readiness is reported without exposing connection details</div></div></div><div class="source-list-inline">${checkCards || '<span class="tag">No readiness checks reported</span>'}</div></article>
+    <article class="panel" style="margin-bottom:15px"><div class="panel-header"><div><div class="panel-title">Pipeline stages</div><div class="panel-subtitle">Agent counts and timings from the latest persisted run</div></div><span class="mono-label">${trace.length} stages recorded</span></div><div class="pipeline">${trace.map((stage) => `<div class="pipeline-step"><span class="pipeline-circle">&#10003;</span><strong>${escapeHtml(friendlyName(stage.agent))}</strong><small>${stage.ms ?? 'Not recorded'} ms</small></div>`).join('')}</div></article>
+    <article class="panel" style="margin-bottom:15px"><div class="panel-header"><div><div class="panel-title">Configured sources</div><div class="panel-subtitle">Feed state and the latest successful poll</div></div></div><div class="source-list">${sourceCards}</div></article>
     <article class="panel"><div class="panel-header"><div><div class="panel-title">Agent trace</div><div class="panel-subtitle">Detailed output from the latest run</div></div></div><div class="agent-list"><div class="agent-row agent-header"><div class="agent-name">Stage</div><div class="agent-cell">Items<small>output</small></div><div class="agent-cell">Duration<small>milliseconds</small></div><div class="agent-cell">LLM calls<small>recorded</small></div><div class="agent-cell">State<small>from trace</small></div></div>${trace.map((stage) => {
-      const count = stage.alerts ?? stage.scored ?? stage.matches ?? stage.extracted ?? stage.advisories ?? stage.owners ?? '—';
-      return `<div class="agent-row"><div class="agent-name"><span class="agent-icon">✓</span>${escapeHtml(friendlyName(stage.agent))}</div><div class="agent-cell">${count}<small>items</small></div><div class="agent-cell">${stage.ms ?? '—'}<small>ms</small></div><div class="agent-cell">${stage.llm_calls ?? 0}<small>${stage.llm || 'no LLM'}</small></div><div>${statusBadge('Recorded', 'healthy')}</div></div>`;
+      const count = stage.alerts ?? stage.scored ?? stage.matches ?? stage.extracted ?? stage.advisories ?? stage.owners ?? 'Not recorded';
+      return `<div class="agent-row"><div class="agent-name"><span class="agent-icon">&#10003;</span>${escapeHtml(friendlyName(stage.agent))}</div><div class="agent-cell">${count}<small>items</small></div><div class="agent-cell">${stage.ms ?? 'Not recorded'}<small>ms</small></div><div class="agent-cell">${stage.llm_calls ?? 0}<small>${stage.llm || 'no LLM'}</small></div><div>${statusBadge('Recorded', 'healthy')}</div></div>`;
     }).join('')}</div></article>`;
 }
-
 function bindPageLinks() {
   document.querySelectorAll('[data-go]').forEach((link) => link.addEventListener('click', () => { activePage = link.dataset.go; }));
 }
@@ -200,37 +351,44 @@ function bindAlertRows() {
   });
 }
 
-function openAlert(alertId) {
-  const alert = model.alerts.find((item) => item.alert_id === alertId);
-  if (!alert) return;
-  const advisory = model.advisories.find((item) => item.id === alert.cve_id);
-  const asset = model.inventory.find((item) => item.asset_id === alert.asset_id);
-  const criticality = asset?.criticality ? friendlyName(asset.criticality) : 'Not available';
-  const isKev = model.kev?.cve_ids?.includes(alert.cve_id) || false;
-  const breakdown = {
-    CVSS: advisory?.cvss ?? 'Unavailable',
-    'KEV bonus': isKev ? '+2.0' : '+0.0',
-    'Internet-facing': asset?.internet_facing ? '+1.5' : '+0.0',
-    'Asset criticality': ({ critical: '+2.0', high: '+1.0', medium: '+0.0', low: '−1.0' })[asset?.criticality] ?? 'Unavailable',
-  };
-  drawerRoot.innerHTML = `<div class="drawer-backdrop" data-close-drawer></div><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title"><div class="drawer-head"><div class="drawer-kicker"><span>ALERT DETAIL · ${escapeHtml(alert.alert_id)}</span><button class="icon-button" type="button" aria-label="Close alert details" data-close-drawer>×</button></div><h2 class="drawer-title" id="drawer-title">${escapeHtml(advisory?.title || alert.cve_id)}</h2><div class="drawer-subtitle mono">${escapeHtml(alert.cve_id)} · ${escapeHtml(sourceLabel(advisory))}</div></div><div class="drawer-body">
-    <div class="drawer-status-row">${priorityBadge(alert.priority)}${statusBadge('Affected')}<span class="tag">SLA ${alert.sla_hours} h</span>${isKev ? '<span class="tag kev-tag">KEV-listed</span>' : ''}</div>
-    <section class="drawer-block"><h3>Affected service</h3><div class="asset-box"><strong>${escapeHtml(alert.service)}</strong><p>${escapeHtml(alert.component)} ${escapeHtml(alert.installed_version)} → fix ${escapeHtml(alert.fixed_version || 'not published')}</p><div class="asset-meta"><span>Asset <strong class="mono">${escapeHtml(alert.asset_id)}</strong></span><span>Owner <strong>${escapeHtml(alert.owner)}</strong></span><span>${asset?.internet_facing ? 'Internet-facing' : 'Internal'}</span><span>${escapeHtml(criticality)} criticality</span></div></div></section>
-    <section class="drawer-block"><h3>Why this priority</h3><div class="score-box"><div class="score-top"><span>Risk score</span><strong>${Number(alert.risk_score).toFixed(1)}</strong></div><div class="score-factors">${Object.entries(breakdown).map(([name, value]) => `<div class="factor-row"><span>${name}</span><strong>${typeof value === 'number' ? value.toFixed(1) : value}</strong></div>`).join('')}</div></div></section>
-    <section class="drawer-block"><h3>Recommended action</h3><div class="fix-box"><strong>Upgrade available · source citation not included</strong>${escapeHtml(alert.remediation)}</div></section>
-    <section class="drawer-block"><h3>Evidence</h3><ul class="evidence-list">${alert.evidence.map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul></section>
-    <section class="drawer-block"><h3>Advisory context</h3><div class="review-callout" style="margin:0">${escapeHtml(advisory?.text || alert.summary)}<br><br><span class="mono-label">Published ${escapeHtml(advisory?.published || 'date unavailable')} · CVSS ${advisory?.cvss ?? 'unavailable'} · KEV ${isKev ? 'Yes' : 'No'}</span></div></section>
-    <div class="drawer-footer"><span>Preview only · no status changes are saved</span><button class="button small" type="button" data-copy-alert="${escapeHtml(alert.cve_id)}">Copy CVE ID</button></div>
-    </div></aside>`;
-  drawerRoot.querySelectorAll('[data-close-drawer]').forEach((element) => element.addEventListener('click', closeDrawer));
-  drawerRoot.querySelector('[data-copy-alert]').addEventListener('click', async (event) => {
-    const value = event.currentTarget.dataset.copyAlert;
-    try { await navigator.clipboard.writeText(value); toast('CVE ID copied'); }
-    catch { toast(`CVE ID: ${value}`); }
-  });
-  document.addEventListener('keydown', onDrawerKeydown, { once: true });
+async function openAlert(alertId) {
+  const baseAlert = model.alerts.find((item) => item.alert_id === alertId);
+  if (!baseAlert) return;
+  drawerRoot.innerHTML = '<div class="drawer-backdrop" data-close-drawer></div><aside class="drawer" role="dialog" aria-modal="true"><div class="drawer-body">Loading finding details...</div></aside>';
+  try {
+    const detail = await apiGet(`/api/v1/alerts/${encodeURIComponent(alertId)}`);
+    const alert = { ...baseAlert, ...detail, alert_id: detail.id, asset_id: detail.asset_key };
+    const advisory = detail.advisory || {};
+    const asset = detail.asset_context || {};
+    const criticality = asset.criticality ? friendlyName(asset.criticality) : 'Not available';
+    const isKev = Boolean(advisory.in_kev);
+    const breakdown = {
+      CVSS: advisory.cvss ?? 'Unavailable',
+      'KEV bonus': isKev ? '+2.0' : '+0.0',
+      'Internet-facing': asset.internet_facing ? '+1.5' : '+0.0',
+      'Asset criticality': ({ critical: '+2.0', high: '+1.0', medium: '+0.0', low: '-1.0' })[asset.criticality] ?? 'Unavailable',
+    };
+    drawerRoot.innerHTML = `<div class="drawer-backdrop" data-close-drawer></div><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title"><div class="drawer-head"><div class="drawer-kicker"><span>ALERT DETAIL - ${escapeHtml(alert.alert_id)}</span><button class="icon-button" type="button" aria-label="Close alert details" data-close-drawer>&times;</button></div><h2 class="drawer-title" id="drawer-title">${escapeHtml(advisory.title || alert.cve_id)}</h2><div class="drawer-subtitle mono">${escapeHtml(alert.cve_id)} - ${escapeHtml(sourceLabel(advisory))}</div></div><div class="drawer-body">
+      <div class="drawer-status-row">${priorityBadge(alert.priority)}${statusBadge('Affected')}<span class="tag">SLA ${alert.sla_hours} h</span>${isKev ? '<span class="tag kev-tag">KEV-listed</span>' : ''}</div>
+      <section class="drawer-block"><h3>Affected service</h3><div class="asset-box"><strong>${escapeHtml(alert.service)}</strong><p>${escapeHtml(alert.component)} ${escapeHtml(alert.installed_version)} -&gt; fix ${escapeHtml(alert.fixed_version || 'not published')}</p><div class="asset-meta"><span>Asset <strong class="mono">${escapeHtml(alert.asset_id)}</strong></span><span>Owner <strong>${escapeHtml(alert.owner)}</strong></span><span>${asset.internet_facing ? 'Internet-facing' : 'Internal'}</span><span>${escapeHtml(criticality)} criticality</span></div></div></section>
+      <section class="drawer-block"><h3>Why this priority</h3><div class="score-box"><div class="score-top"><span>Risk score</span><strong>${Number(alert.risk_score).toFixed(1)}</strong></div><div class="score-factors">${Object.entries(breakdown).map(([name, value]) => `<div class="factor-row"><span>${escapeHtml(name)}</span><strong>${typeof value === 'number' ? value.toFixed(1) : escapeHtml(value)}</strong></div>`).join('')}</div></div></section>
+      <section class="drawer-block"><h3>Recommended action</h3><div class="fix-box"><strong>Recommended remediation</strong>${escapeHtml(alert.remediation)}</div></section>
+      <section class="drawer-block"><h3>Evidence</h3><ul class="evidence-list">${(alert.evidence || []).map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul></section>
+      <section class="drawer-block"><h3>Advisory context</h3><div class="review-callout" style="margin:0">${escapeHtml(advisory.text || alert.summary)}<br><br><span class="mono-label">Published ${escapeHtml(advisory.published || 'date unavailable')} | CVSS ${advisory.cvss ?? 'unavailable'} | KEV ${isKev ? 'Yes' : 'No'}</span></div></section>
+      <div class="drawer-footer"><span>Evidence from the persisted run</span><button class="button small" type="button" data-copy-alert="${escapeHtml(alert.cve_id)}">Copy CVE ID</button></div>
+      </div></aside>`;
+    drawerRoot.querySelectorAll('[data-close-drawer]').forEach((element) => element.addEventListener('click', closeDrawer));
+    drawerRoot.querySelector('[data-copy-alert]').addEventListener('click', async (event) => {
+      const value = event.currentTarget.dataset.copyAlert;
+      try { await navigator.clipboard.writeText(value); toast('CVE ID copied'); }
+      catch { toast(`CVE ID: ${value}`); }
+    });
+    document.addEventListener('keydown', onDrawerKeydown, { once: true });
+  } catch (error) {
+    closeDrawer();
+    toast(error.message || 'Could not load finding details');
+  }
 }
-
 function onDrawerKeydown(event) {
   if (event.key === 'Escape') closeDrawer();
   else if (drawerRoot.querySelector('.drawer')) document.addEventListener('keydown', onDrawerKeydown, { once: true });

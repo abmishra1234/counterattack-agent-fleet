@@ -12,7 +12,7 @@ Each entry: context → options → decision → consequences → revisit trigge
 | DL-05 | Risk policy implemented as a pure function with a per-factor breakdown | Accepted |
 | DL-06 | Grounding check on every LLM extraction; failures go to a human queue | Accepted |
 | DL-07 | Layered prompt-injection defence | Accepted |
-| DL-08 | LLM behind a port: FakeLLM in CI, OpenAI-compatible gateway live | Accepted |
+| DL-08 | LLM behind a port: FakeLLM in CI, audited OpenAI-compatible gateway | Accepted |
 | DL-09 | Alerts written to a per-owner outbox, never sent | Accepted |
 | DL-10 | Synthetic, offline fixtures (CVE-2099-xxxx) | Accepted |
 | DL-11 | Gold-label eval as a CI release gate; live-LLM run is manual | Accepted |
@@ -102,9 +102,30 @@ Bands: **P1 ≥ 12 (24 h)**, **P2 ≥ 9 (7 d)**, **P3 ≥ 6 (30 d)**, **P4 < 6 (
 **Consequence.** The `requests` alert for `kyc-service` is still raised at its computed priority (P4).
 
 ## DL-08 — LLM access
-**Decision.** An `LLMPort` protocol with two backends: `FakeLLM` (deterministic test double, default) and `GatewayLLM` (any OpenAI-compatible `/chat/completions` endpoint via `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`; stdlib `urllib`, temperature 0, JSON mode for extraction).
-**Rationale.** CI must run offline and free; production must use the approved enterprise gateway. No vendor SDK keeps the dependency list to three packages.
+**Decision.** An `LLMPort` protocol with `FakeLLM` (deterministic test double, default) and an OpenAI-compatible gateway adapter configured through `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL`.
+**Rationale.** CI must run offline and free; production must use the approved enterprise gateway. Keeping the provider behind a port avoids a vendor-specific SDK dependency and preserves provider choice.
 **Revisit when** the team standardises on a shared client module (e.g. the cohort's `llm_client.py`) — wrap it behind the same port.
+
+**Current implementation gate (31 October 2026).** The gateway now uses encrypted per-attempt prompt/response artifacts, metering, effective-dated pricing, spend controls, local role gates, and a purpose-required audited artifact-content endpoint. Live use remains off by default pending provider/data-boundary and retention approval, hosted OIDC/SSO, PostgreSQL acceptance, and worker run-context verification. `FakeLLM` remains available for offline runs. The adapter requires a persisted run ID and cannot send a request if its encrypted request artifact fails to commit.
+
+## DL-13 — Privileged LLM artifact reads
+**Decision.** Keep `GET /api/v1/llm/usage/{call_id}` metadata-only. Expose exact content through `POST /api/v1/llm/usage/{call_id}/content`, requiring the configured `llm_audit_reader` capability, a selected artifact kind, and a specific access purpose. Persist both successful and unsuccessful access outcomes.
+**Rationale.** A dedicated write request makes the audit purpose explicit and avoids returning sensitive prompts, queries, or model responses in ordinary metadata/report requests.
+**Status.** Implemented for local development roles; hosted identity and runtime acceptance remain pending.
+
+## DL-14 — Audit event review API
+**Context.** API requests, decisions, worker transitions, and LLM access already append to the PostgreSQL hash chain, but operators have no supported way to query event metadata or invoke the chain verifier through the API.
+
+**Decision.** Add paginated/filterable `GET /api/v1/audit/events` and `GET /api/v1/audit/integrity`. Require the separate `audit_reader` capability (also granted to `admin`). Return only bounded event metadata and hashes; do not return free-form reasons, safe detail payloads, prompts, or responses. Audit access to both endpoints through the existing API request audit middleware.
+
+**Status.** Implemented for configured local roles; PostgreSQL and role-matrix acceptance remain pending.
+
+## DL-15 — Local Docker API access boundary
+**Context.** The API's development authorization gate accepts loopback clients. A containerized API must bind inside its container to a reachable interface, while the Compose stack should remain usable from the host without enabling shared or production access.
+
+**Decision.** Compose publishes the API only on host `127.0.0.1`, keeps PostgreSQL private, and allowlists only the configured private Compose bridge CIDR for development/test role checks. Production settings reject `API_TRUSTED_LOCAL_CLIENT_CIDRS`; hosted deployment remains blocked on OIDC/SSO and network policy.
+
+**Status.** Implemented in local Compose/configuration; Docker runtime and network-boundary acceptance remain pending.
 
 ## DL-09 — Alert delivery
 **Decision.** Write `out/outbox/<owner>.md` and `out/alerts.json`. No email, Slack or ticket creation.
@@ -117,7 +138,7 @@ Bands: **P1 ≥ 12 (24 h)**, **P2 ≥ 9 (7 d)**, **P3 ≥ 6 (30 d)**, **P4 < 6 (
 
 ## DL-11 — Evaluation and the CI gate
 **Decision.** `counterstrike eval` compares the outbox with `data/gold/expected_alerts.json` and fails the build unless: precision = 1.0, recall = 1.0, priority accuracy = 1.0, zero alerts on `must_not_alert` pairs, the unparseable advisory is in `needs_human`, the injection advisory still alerts, and every summary is grounded. The scorecard is appended to the GitHub job summary and the outbox uploaded as an artifact.
-A live-LLM run exists as a **manual** `workflow_dispatch` job (recall threshold 0.8, safety checks unchanged) so tokens are spent only on purpose.
+A live-LLM run is intended as a **manual** `workflow_dispatch` job (recall threshold 0.8, safety checks unchanged) after encrypted request/response capture, usage/cost metering, and privileged artifact access are implemented. Until then, the workflow reports that the live call was gated and sends no model request.
 
 ## DL-12 — Shared state
 **Decision.** `FleetState` is a `TypedDict`; `needs_human` and `trace` use `Annotated[list, operator.add]` so any agent can append without overwriting another's entries. All payloads are pydantic models.

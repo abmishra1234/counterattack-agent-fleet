@@ -1,7 +1,9 @@
 # Backend API and LLM Integration Strategy
 
-**Decision status: Proposed — awaiting stakeholder approval before implementation.**  
+**Decision status: Accepted as the implementation planning baseline on 31 October 2026.**
 **Purpose:** Freeze a practical backend, API, persistence, and LLM design for the Counterstrike agent fleet, then implement against the approved contract.
+
+The user authorized phased implementation planning and execution against this baseline. Provider-specific data boundary, prompt/response retention, identity, pricing, and platform decisions remain explicit gates in [the implementation tracker](BACKEND_IMPLEMENTATION_TRACKER.md); live LLM calls remain disabled until those gates are resolved.
 
 ## 1. Recommendation
 
@@ -87,30 +89,36 @@ All paths below are under `/api/v1`. JSON timestamps use UTC ISO 8601. Collectio
 | Method and path | Purpose | Response / behavior |
 |---|---|---|
 | `GET /health/live` | Process liveness | `200` if the API process is running. No DB dependency. |
-| `GET /health/ready` | Service readiness | `200` when DB and migrations are available; otherwise `503` with safe dependency status. |
+| `GET /health/ready` | Service readiness | `200` when the configured database is reachable and at the repository's current Alembic head. Without a database, only non-production fixture mode is ready when all required fixtures exist; otherwise return `503` with safe dependency status. |
+| `GET /auth/context` | UI capability context | Return the configured local development identity and capability names; this endpoint is informational and does not authenticate callers. |
 | `GET /dashboard` | Overview page aggregate | Latest run, priority counts, affected asset count, review count, and selected latest findings. |
 | `GET /alerts` | Alert list | Filter by `priority`, `owner`, `service`, `search`, `since`, and bounded pagination; sorted by priority/risk/time. |
-| `GET /alerts/{alert_id}` | Alert detail | Alert facts, score breakdown/policy version, source references, evidence, and latest run association. |
-| `GET /reviews` | Analyst queue | Open, resolved, and filtered human-review cases with reason and source evidence. |
+| `GET /alerts/{alert_id}` | Alert detail | Alert facts, bounded advisory context, associated inventory security posture, score breakdown/policy version, source references, evidence, and latest run association. |
+| `GET /reviews` | Analyst queue | Open, resolved, and filtered human-review cases with reason, bounded source-bulletin text, source references, and decision history. |
 | `POST /reviews/{review_id}/decision` | Record analyst disposition | Validated disposition and note; appends an audit event. It does not suppress an existing alert without an explicit, separately audited action. |
 | `GET /runs` | Run history | Paginated status, trigger, timestamps, and summary counts. |
 | `POST /runs` | Queue a manual run | `202` plus `run_id`, status URL, and accepted timestamp. Accepts an approved trigger/input scope only; no arbitrary filesystem paths. |
 | `GET /runs/{run_id}` | Run status and trace | Pending/running/succeeded/partial/failed, stage trace, source fetch results, safe error codes, and counts. |
 | `GET /sources` | Feed status | Source enabled state, last attempt/success, checkpoint, and latest safe error category. |
+| `GET /audit/events` | Filtered audit history | Bounded, paginated event metadata filtered by UTC time, event type, outcome, actor, run, or request; excludes free-form reasons and event details. Requires `audit_reader` or `admin`; access itself is audited. |
+| `GET /audit/integrity` | Verify audit-chain integrity | Valid/invalid result, checked event count, and a failure reference when invalid. Requires `audit_reader` or `admin`; access itself is audited. |
 | `GET /llm/usage` | Aggregate and inspect model usage | Filter by time window, run, provider, model, task, and outcome; show known cost and unknown-cost counts separately. |
-| `GET /llm/usage/{call_id}` | Inspect a single model attempt | Return call metadata and exact audited request/response only to the privileged LLM-audit role; every content view is audited. |
+| `GET /llm/usage/{call_id}` | Inspect a single model attempt | Return safe call and artifact metadata only. Exact content is available through the purpose-required privileged content-read operation below. |
+| `POST /llm/usage/{call_id}/content` | Privileged LLM audit read | Require `llm_audit_reader` and a validated purpose plus artifact kind; decrypt and return one retained request/response/parsed-output/error artifact, and persist every access outcome in the audit chain. |
 | `GET /llm/usage/report` | Produce detailed or aggregate usage report | Filter by time, run, task, provider/model, actor, prompt version, advisory, and outcome; group by day/run/task/model/prompt version or return individual attempts. |
 | `GET /llm/budgets` | Inspect spend limits and current totals | Configured limits, usage to date, remaining amount, and threshold status; unknown costs remain separate. |
 | `GET /openapi.json` | Machine-readable API contract | Generated from API DTOs. Interactive docs are enabled only for local/dev unless explicitly approved for deployment. |
 
 ### API rules
 
-- `400` for invalid filters/payloads; `404` for unknown IDs; `409` for conflicting run/review transitions; `422` for schema validation; `429` for configured rate limiting; `503` for temporary service dependency failures.
+- `404` for unknown IDs; `409` for conflicting run/review transitions; `422` for invalid filters, payloads, and schema validation; `429` for configured rate limiting; `503` for temporary service dependency failures.
 - Validate all IDs, enum values, string lengths, pagination bounds, and request body size.
 - Do not accept arbitrary data/output directories or caller-supplied model/provider URLs through the API.
-- Require an `Idempotency-Key` for manual run creation; return the existing job response for a duplicate key. The worker also de-duplicates scheduled run windows and source advisory keys.
+- Require an `Idempotency-Key` for manual run creation; return `run_id`, `status_url`, and `accepted_at`, including the existing job response for a duplicate key. The worker also de-duplicates scheduled run windows and source advisory keys.
 - Human-review decisions carry reviewer identity from authenticated context, never a caller-provided identity field. Local demo may use an explicitly labelled development identity until real SSO is agreed.
-- API authentication is a deployment gate. Local development can bind to loopback; shared or hosted deployments require approved OIDC/SSO and role checks before enabling run/review actions.
+- Local development role capabilities are explicit: `viewer` (read), `analyst` (read/review), `operator` (read/review/run/usage), `audit_reader` (read/audit events and chain status), `llm_audit_reader` (read/usage/LLM content), and `admin` (all listed capabilities). The role is loaded from trusted configuration and is never accepted from a request.
+- API authentication is a deployment gate. Local role gates operate only in development/test with loopback access, or with an explicitly allowlisted private Docker bridge while the host port is published to loopback only. Production rejects trusted-local CIDR configuration; protected routes remain denied until approved OIDC/SSO role checks are implemented. `/auth/context` is informational only.
+- Persist a correlated audit event for every protected API request, including method, route template, outcome, status, and bounded non-secret query filters. Never put raw request bodies, credentials, prompts, or model responses in operational logs; prompts and responses use encrypted LLM artifacts.
 
 ## 6. Persistence model and ownership
 
@@ -155,6 +163,9 @@ POLL_INTERVAL_MINUTES=15
 
 # LLM: keep fake as the safe offline default
 LLM_PROVIDER=fake
+LLM_LIVE_CALLS_ENABLED=false
+LLM_DATA_BOUNDARY_APPROVED=false
+LLM_ARTIFACT_RETENTION_APPROVED=false
 LLM_BASE_URL=https://gateway.example.invalid/v1
 LLM_API_KEY=replace-with-secret
 LLM_MODEL=replace-with-approved-model
@@ -163,7 +174,7 @@ LLM_MAX_RETRIES=2
 LLM_MAX_OUTPUT_TOKENS=1200
 LLM_EXTRACTION_ENABLED=true
 LLM_SUMMARY_ENABLED=true
-LLM_AUDIT_CONTENT_CAPTURE=true
+LLM_AUDIT_CONTENT_CAPTURE=false
 LLM_AUDIT_ENCRYPTION_KEY=replace-with-secret-key
 LLM_AUDIT_ARTIFACT_RETENTION_DAYS=configure-after-policy-approval
 LLM_INPUT_PRICE_USD_PER_1M=
@@ -172,7 +183,9 @@ LLM_MAX_COST_PER_RUN_USD=
 LLM_MAX_COST_PER_MONTH_USD=
 ```
 
-No committed `.env` contains a working API key. `.env.example` must not look like a usable secret. Hosted environments inject `DATABASE_URL` and `LLM_API_KEY` from the platform secret store; logs and API responses expose only provider/model labels after redaction, never the key or full secret-bearing URL.
+The live adapter additionally requires explicit provider/data-boundary and artifact-retention approvals, a persisted run context, a migrated database, and durable encrypted request capture. `LLM_LIVE_CALLS_ENABLED` defaults to false; setting it true without those gates is invalid. Live use remains disabled until the provider decision and role/budget controls are accepted.
+
+No committed `.env` contains a working API key. `.env.example` must not look like a usable secret. `LLM_AUDIT_CONTENT_CAPTURE` stays false until durable encrypted storage and its access policy are implemented; enabling the gateway requires changing it to true alongside the required encryption key and approved retention period. Hosted environments inject `DATABASE_URL` and `LLM_API_KEY` from the platform secret store; logs and API responses expose only provider/model labels after redaction, never the key or full secret-bearing URL.
 
 ### Call behavior
 
@@ -188,18 +201,21 @@ No committed `.env` contains a working API key. `.env.example` must not look lik
 
 ### Usage and cost API
 
-Add the following read-only endpoints to the API contract:
+Add the following usage, reporting, and audited-content endpoints to the API contract:
 
 | Method and path | Purpose | Response / behavior |
 |---|---|---|
 | `GET /llm/usage` | Aggregate and inspect model usage | Filter by time window, run, provider, model, task, actor, prompt version, advisory, and outcome. Return calls, retries, provider-reported tokens, known cost by currency, and unknown-cost counts; exclude prompt/response bodies. |
-| `GET /llm/usage/{call_id}` | Inspect one metered attempt | Return safe metadata by default. A privileged LLM-audit reader may request exact prompts/query/context and raw/parsed response; the request must include an access purpose and creates an audit event. |
+| `GET /llm/usage/{call_id}` | Inspect one metered attempt | Return safe call and artifact metadata only; message content is not included. |
+| `POST /llm/usage/{call_id}/content` | Read an individual encrypted artifact | Require the `llm_audit_reader` role, artifact kind, and a specific purpose. Return only the selected artifact and append the access outcome to the durable audit chain. |
 | `GET /llm/usage/report` | Produce detailed or aggregate usage report | Filter by time, run, task, provider/model, actor, prompt version, advisory, and outcome; group by day/run/task/model/prompt version or return individual attempts. |
 | `GET /llm/budgets` | Read configured limits and current period totals | Return limits, spend/usage to date, remaining amount, and threshold state. Values with unknown cost remain separately visible. |
 
 These endpoints require an operator/security role if hosted because model usage and spend can be commercially sensitive. Access to prompt/response contents requires a separate `llm_audit_reader` role and purpose/reason; content is excluded from aggregate responses. The API does not expose a key-management or pricing-edit operation; pricing and ceilings come from protected environment/configuration or a future controlled admin workflow. Empty price settings mean **cost unknown**; they do not disable token counting or silently set spend to zero. A hard spend ceiling requires a valid rate configuration and should fail startup if the ceiling is enabled without rates. Live-model startup also requires approved encryption-key and artifact-retention settings; if full content cannot be durably encrypted before a request, the call must not be sent.
 
-Usage and aggregate reports never include message contents. The individual-call endpoint returns content only to a separate `llm_audit_reader` role, requires a purpose/reason, and appends an `llm_audit_access` event. Bulk content export requires separate explicit authorization and bounded date/run filters.
+Audit event listing and chain verification use a separate `audit_reader` capability (also granted to `admin`). Event views expose indexed metadata and hashes only; they omit arbitrary event details, reasons, prompts, and responses. Every audit-view request creates its own API access audit event.
+
+Usage and aggregate reports never include message contents. The dedicated content-read endpoint returns one artifact only to a separate `llm_audit_reader` role, requires a purpose/reason, and appends an `llm_audit_access` event. Bulk content export requires separate explicit authorization and bounded date/run filters.
 
 ## 8. Observability and audit design
 

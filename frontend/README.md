@@ -1,12 +1,15 @@
-# Counterstrike UI preview
+# Counterstrike UI
 
-This is a read-only frontend preview for reviewing the proposed look and feel. It reads the current local run artifacts and synthetic input fixtures. It does not send notifications or save review decisions.
+The frontend is served by the Python API from the same origin. The current dashboard data route is a temporary fixture-backed compatibility endpoint; durable API workflows are being added in phases.
 
 From the repository root:
 
 ```text
+copy .env.example .env
 python -m counterstrike run --data data --out out
-node frontend/server.js
+counterstrike-api
 ```
 
-Then open `http://127.0.0.1:4173`. Change the port with the `PORT` environment variable if needed. The preview uses no frontend build step or additional package installation.
+Open `http://127.0.0.1:8000`. Install the project first with `pip install -e ".[dev]"` if the `counterstrike-api` command is not available. Change `API_PORT` in `.env` to choose another port. The UI has no frontend build step.
+
+The API binds to `127.0.0.1` by default. Live LLM calls are not enabled by this API foundation; keep `LLM_PROVIDER=fake` until encrypted prompt/response auditing and the approved retention configuration are implemented.

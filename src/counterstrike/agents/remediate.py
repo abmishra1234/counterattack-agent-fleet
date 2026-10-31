@@ -7,6 +7,7 @@ summary, and that summary is rejected if it mentions any version not in the fact
 from __future__ import annotations
 
 import time
+import logging
 
 from counterstrike.guards import summary_is_grounded
 from counterstrike.llm import LLMPort
@@ -14,6 +15,7 @@ from counterstrike.models import Alert, FleetState
 from counterstrike.versions import spec_versions, versions_in
 
 PROMPT_VERSION = "summarise_v1"
+logger = logging.getLogger("counterstrike.agent.remediate")
 SYSTEM = """Write a 1-2 sentence alert summary for an engineering owner.
 Use only the facts given. Do not invent versions, exploits or priorities. No markdown."""
 
@@ -43,7 +45,30 @@ def remediate_agent(state: FleetState, llm: LLMPort) -> dict:
             "priority": s.priority,
         }
         user = "\n".join(f"{k}: {v}" for k, v in facts.items())
-        summary = llm.complete("summarise", SYSTEM, user, context=facts).strip()
+        try:
+            summary = llm.complete(
+                "summarise",
+                SYSTEM,
+                user,
+                context={
+                    **facts,
+                    "_counterstrike_audit": {
+                        "prompt_version": PROMPT_VERSION,
+                        "advisory_id": s.advisory_id,
+                    },
+                },
+            ).strip()
+        except Exception as exc:
+            logger.warning(
+                "Summary model call failed; using deterministic summary",
+                extra={
+                    "event": "agent.remediate.call_failed",
+                    "task": "summarise",
+                    "advisory_id": s.advisory_id,
+                    "error_code": type(exc).__name__,
+                },
+            )
+            summary = ""
         allowed = (
             {s.installed_version, s.fixed_version or ""}
             | spec_versions(s.affected)
