@@ -42,7 +42,7 @@ def build_graph(
     )
     g.add_node("extract", partial(extract_agent, llm=llm))
     g.add_node("correlate", correlate_agent)
-    g.add_node("score", score_agent)
+    g.add_node("score", partial(score_agent, settings=settings))
     g.add_node("remediate", partial(remediate_agent, llm=llm))
     g.add_node("dispatch", dispatch_agent)
 

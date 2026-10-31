@@ -139,7 +139,7 @@ class ScoredMatch(Match):
     risk_score: float
     priority: Priority
     sla_hours: int
-    score_breakdown: dict[str, float]
+    score_breakdown: dict[str, Any]
 
 
 class Alert(BaseModel):

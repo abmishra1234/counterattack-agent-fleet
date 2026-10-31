@@ -54,6 +54,8 @@ AUDIT_QUERY_VALUE_PATTERNS = {
     "limit": re.compile(r"^[0-9]{1,3}$"),
     "offset": re.compile(r"^[0-9]{1,7}$"),
     "priority": re.compile(r"^P[1-4]$"),
+    "criticality": re.compile(r"^(critical|high|medium|low)$"),
+    "internet_facing": re.compile(r"^(true|false)$"),
     "state": re.compile(r"^[a-z_]{1,24}$"),
     "status": re.compile(r"^[a-z_]{1,24}$"),
     "outcome": re.compile(r"^[a-z_]{1,24}$"),
@@ -253,7 +255,7 @@ class InventoryResponse(BaseModel):
     total: int
     limit: int
     offset: int
-    mode: Literal["persisted_snapshot", "local_fixture"]
+    mode: Literal["persisted_snapshot"]
     snapshot_id: str | None
 
 
@@ -481,6 +483,13 @@ class AlertScoreBreakdown(BaseModel):
     kev: float | None = None
     internet_facing: float | None = None
     criticality: float | None = None
+    epss: float | None = None
+    epss_weight: float | None = None
+    epss_status: str | None = None
+    epss_probability: float | None = None
+    epss_score_date: str | None = None
+    epss_observed_at: datetime | None = None
+    epss_source_url: str | None = None
     kev_internet_p1_override: float | None = None
 
 
@@ -673,7 +682,7 @@ def _read_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _preview_payload(settings):
+def _preview_payload(settings, *, include_owner_contact=False):
     """Temporary fixture-backed response retained for the existing UI during migration."""
 
     try:
@@ -685,7 +694,10 @@ def _preview_payload(settings):
             "report": _read_json(report_path),
             "advisories": _read_json(settings.data_dir / "advisories.json"),
             "inventory": [
-                asset.model_dump(mode="json")
+                {
+                    **asset.model_dump(mode="json"),
+                    **({} if include_owner_contact else {"owner_contact": None}),
+                }
                 for asset in load_inventory_document(settings.data_dir / "inventory.json").assets
             ],
             "kev": _read_json(settings.data_dir / "kev.json"),
@@ -752,6 +764,9 @@ def create_app(settings=None):
         "llm_audit_reader": {"read", "usage", "llm_content"},
         "admin": {"read", "review", "run", "usage", "llm_content", "audit", "metrics"},
     }
+
+    def can_view_owner_contact():
+        return "review" in role_capabilities.get(settings.local_dev_role, set())
 
     def required_capability(path, method):
         if path == "/metrics":
@@ -1545,55 +1560,6 @@ def create_app(settings=None):
         internet_facing: bool | None = Query(default=None),
         session=Depends(db_session),
     ):
-        if settings.database_url is None:
-            assets = load_inventory_document(settings.data_dir / "inventory.json").assets
-            filtered = [
-                asset
-                for asset in assets
-                if (criticality is None or asset.criticality == criticality)
-                and (internet_facing is None or asset.internet_facing == internet_facing)
-                and (
-                    not search
-                    or search.casefold()
-                    in " ".join(
-                        (
-                            asset.asset_id,
-                            asset.service,
-                            asset.vendor or "",
-                            asset.inventory_product,
-                            asset.component,
-                            asset.version,
-                            asset.owner,
-                        )
-                    ).casefold()
-                )
-            ]
-            return {
-                "items": [
-                    {
-                        "asset_key": asset.asset_id,
-                        "asset_type": asset.asset_type,
-                        "service": asset.service,
-                        "vendor": asset.vendor,
-                        "product": asset.inventory_product,
-                        "component": asset.component,
-                        "version": asset.version,
-                        "owner": asset.owner,
-                        "owner_contact": asset.owner_contact,
-                        "criticality": asset.criticality,
-                        "internet_facing": asset.internet_facing,
-                        "data_classification": asset.data_classification,
-                        "aliases": asset.aliases,
-                    }
-                    for asset in filtered[offset : offset + limit]
-                ],
-                "total": len(filtered),
-                "limit": limit,
-                "offset": offset,
-                "mode": "local_fixture",
-                "snapshot_id": None,
-            }
-
         snapshot_id = session.scalar(
             select(RunRecord.inventory_snapshot_id)
             .where(RunRecord.inventory_snapshot_id.is_not(None))
@@ -1645,7 +1611,7 @@ def create_app(settings=None):
                     "component": asset.component,
                     "version": asset.version,
                     "owner": asset.owner,
-                    "owner_contact": asset.owner_contact,
+                    "owner_contact": asset.owner_contact if can_view_owner_contact() else None,
                     "criticality": asset.criticality,
                     "internet_facing": asset.internet_facing,
                     "data_classification": asset.data_classification,
@@ -1898,7 +1864,7 @@ def create_app(settings=None):
                 "data_classification": asset.data_classification,
                 "vendor": asset.vendor,
                 "product": (asset.extra_context or {}).get("product", asset.component),
-                "owner_contact": asset.owner_contact,
+                "owner_contact": asset.owner_contact if can_view_owner_contact() else None,
                 "aliases": (asset.extra_context or {}).get("aliases", []),
             }
             if asset
@@ -2777,7 +2743,7 @@ def create_app(settings=None):
     )
     async def legacy_preview_data():
         try:
-            return _preview_payload(settings)
+            return _preview_payload(settings, include_owner_contact=can_view_owner_contact())
         except RuntimeError as exc:
             return JSONResponse(
                 status_code=503,

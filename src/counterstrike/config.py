@@ -120,6 +120,11 @@ class Settings(BaseModel):
     public_feeds_approved: bool = False
     epss_enabled: bool = False
     epss_approved: bool = False
+    epss_scoring_approved: bool = False
+    epss_risk_weight: Decimal | None = Field(
+        default=None, gt=0, le=10, max_digits=6, decimal_places=3
+    )
+    epss_max_age_days: int | None = Field(default=None, ge=1, le=365)
     public_feed_scheduler_enabled: bool = False
     public_feed_poll_interval_minutes: int = Field(default=15, ge=1, le=1440)
     nvd_api_key: SecretStr | None = None
@@ -322,6 +327,17 @@ class Settings(BaseModel):
             raise ValueError(
                 "EPSS enrichment requires enabled, approved public feeds and EPSS_APPROVED=true"
             )
+        if self.epss_scoring_approved:
+            if not self.epss_enabled or not self.epss_approved:
+                raise ValueError(
+                    "EPSS scoring approval requires enabled and approved EPSS enrichment"
+                )
+            if self.epss_risk_weight is None or self.epss_max_age_days is None:
+                raise ValueError(
+                    "EPSS scoring approval requires an explicit weight and maximum age"
+                )
+        elif self.epss_risk_weight is not None or self.epss_max_age_days is not None:
+            raise ValueError("EPSS scoring weight and age require EPSS_SCORING_APPROVED=true")
         if self.public_feed_scheduler_enabled and not (
             self.public_feeds_enabled and self.public_feeds_approved and self.database_url
         ):
@@ -449,6 +465,11 @@ def load_settings(dotenv_path: Path = DOTENV_PATH) -> Settings:
             ),
             epss_enabled=_as_bool(values.get("EPSS_ENABLED", "false"), "EPSS_ENABLED"),
             epss_approved=_as_bool(values.get("EPSS_APPROVED", "false"), "EPSS_APPROVED"),
+            epss_scoring_approved=_as_bool(
+                values.get("EPSS_SCORING_APPROVED", "false"), "EPSS_SCORING_APPROVED"
+            ),
+            epss_risk_weight=optional("EPSS_RISK_WEIGHT"),
+            epss_max_age_days=optional("EPSS_MAX_AGE_DAYS"),
             public_feed_scheduler_enabled=_as_bool(
                 values.get("PUBLIC_FEED_SCHEDULER_ENABLED", "false"),
                 "PUBLIC_FEED_SCHEDULER_ENABLED",

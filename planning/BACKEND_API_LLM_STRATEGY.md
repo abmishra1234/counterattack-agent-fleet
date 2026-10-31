@@ -273,6 +273,8 @@ Every user/system action that creates, changes, or reads security-sensitive or c
 
 The source adapters normalize NVD, CISA KEV, OSV, and EPSS inputs into source-aware domain records; the exact first three production sources and access requirements must be confirmed. Keep fixture JSON as an adapter used by tests and offline evaluation.
 
+EPSS source approval and EPSS risk-scoring approval are separate gates. Scoring requires an approved EPSS feed plus explicit `EPSS_RISK_WEIGHT` and `EPSS_MAX_AGE_DAYS`; without all gates, EPSS contributes zero and the existing KEV + internet-facing P1 rule remains unchanged. Stale, future-dated, missing, invalid, or not-scored observations contribute zero and are exposed as a reason in the breakdown. The configured weight and age are part of the persisted risk-policy version so later reports can reproduce the priority decision.
+
 1. Scheduler creates a unique poll job for each source/window; the DB uniqueness key prevents duplicate scheduled work.
 2. Worker claims one job with a lease and records an attempt before calling a source.
 3. Adapter makes bounded HTTP requests, honors rate limits/`Retry-After`, validates payloads, and records source-specific success/failure. A failing feed does not block other source jobs.

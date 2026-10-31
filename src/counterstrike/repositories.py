@@ -192,7 +192,7 @@ def persist_run_results(
     run_id: str,
     state: FleetState,
     *,
-    policy_version: str = POLICY_VERSION,
+    policy_version: str | None = None,
     settings: Settings | None = None,
 ) -> RunRecord:
     """Persist a complete graph result atomically with run completion.
@@ -201,6 +201,14 @@ def persist_run_results(
     the surrounding transaction rolls back.
     """
     settings = settings or load_settings()
+    policy_version = policy_version or next(
+        (
+            str(item["policy_version"])
+            for item in state.get("trace", [])
+            if item.get("agent") == "score" and item.get("policy_version")
+        ),
+        POLICY_VERSION,
+    )
     run = session.get(RunRecord, run_id)
     if run is None:
         raise LookupError("run_not_found")
