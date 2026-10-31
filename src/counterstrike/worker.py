@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from sqlalchemy import or_, select
 
+from counterstrike.artifacts import purge_expired_artifacts
 from counterstrike.audit import append_event
 from counterstrike.config import load_settings
 from counterstrike.db import session_scope
@@ -203,9 +204,29 @@ def main() -> None:
     worker_id = os.getenv("WORKER_ID", f"{socket.gethostname()}-{uuid4().hex[:8]}")
     lease_seconds = max(15, int(os.getenv("WORKER_LEASE_SECONDS", "90")))
     poll_seconds = max(1, float(os.getenv("WORKER_POLL_SECONDS", "2")))
+    retention_sweep_interval = 300.0
+    last_retention_sweep = 0.0
     logger.info("worker_started", extra={"worker_id": worker_id})
     while True:
         try:
+            monotonic_now = time.monotonic()
+            if monotonic_now - last_retention_sweep >= retention_sweep_interval:
+                last_retention_sweep = monotonic_now
+                settings = load_settings()
+                if (
+                    settings.llm_audit_content_capture
+                    and settings.llm_audit_artifact_retention_days is not None
+                ):
+                    with session_scope(settings) as session:
+                        purged_count = purge_expired_artifacts(session, actor_id=worker_id)
+                    if purged_count:
+                        logger.info(
+                            "Expired LLM artifacts purged",
+                            extra={
+                                "event": "llm.artifact.retention.purge_completed",
+                                "artifact_count": purged_count,
+                            },
+                        )
             job_id = claim_job(worker_id, lease_seconds)
             if job_id is None:
                 time.sleep(poll_seconds)

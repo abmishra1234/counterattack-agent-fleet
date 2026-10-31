@@ -311,6 +311,7 @@ class LLMArtifactMetadata(BaseModel):
     key_version: str
     captured_at: datetime
     retention_expires_at: datetime
+    purged_at: datetime | None
 
 
 class LLMCallDetailResponse(LLMCallItem):
@@ -752,10 +753,6 @@ def create_app(settings=None):
 
         if not IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key):
             raise HTTPException(status_code=422, detail="Invalid Idempotency-Key")
-        if settings.api_host.lower() not in {"::1", "127.0.0.1", "localhost"}:
-            raise HTTPException(
-                status_code=403, detail="Manual run creation requires authenticated access"
-            )
         existing = session.scalar(
             select(JobRecord).where(JobRecord.idempotency_key == idempotency_key)
         )
@@ -902,10 +899,6 @@ def create_app(settings=None):
         offset: int = Query(default=0, ge=0, le=1000000),
         session=Depends(db_session),
     ):
-        if settings.api_host.lower() not in {"::1", "127.0.0.1", "localhost"}:
-            raise HTTPException(
-                status_code=403, detail="Review access requires authenticated access"
-            )
         conditions = []
         if state:
             conditions.append(ReviewCase.state == state)
@@ -999,10 +992,6 @@ def create_app(settings=None):
     def submit_review_decision(
         review_id: str, decision: ReviewDecisionRequest, session=Depends(db_session)
     ):
-        if settings.api_host.lower() not in {"::1", "127.0.0.1", "localhost"}:
-            raise HTTPException(
-                status_code=403, detail="Review decisions require authenticated access"
-            )
         case = session.scalar(
             select(ReviewCase).where(ReviewCase.id == review_id).with_for_update()
         )
@@ -1582,6 +1571,7 @@ def create_app(settings=None):
                     "key_version": artifact.encryption_key_version,
                     "captured_at": artifact.captured_at,
                     "retention_expires_at": artifact.retention_expires_at,
+                    "purged_at": artifact.purged_at,
                 }
                 for artifact in artifacts
             ],
@@ -1654,7 +1644,7 @@ def create_app(settings=None):
         if outcome != "success":
             status_code = (
                 410
-                if outcome == "expired"
+                if outcome in {"expired", "purged"}
                 else 503
                 if outcome == "key_unavailable"
                 else 500

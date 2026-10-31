@@ -5,11 +5,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import secrets
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from counterstrike.audit import append_event
@@ -51,10 +53,8 @@ def store_artifact(
     cipher, key_version = _cipher(settings)
     raw = content if isinstance(content, bytes) else content.encode("utf-8")
     artifact_id = str(uuid4())
-    import secrets
-
     nonce = secrets.token_bytes(12)
-    aad = f"{artifact_id}:{call_id}:{kind}:{key_version}".encode("utf-8")
+    aad = f"{artifact_id}:{call_id}:{kind}:{key_version}".encode()
     encrypted = nonce + cipher.encrypt(nonce, raw, aad)
     artifact = LLMExchangeArtifact(
         id=artifact_id,
@@ -64,7 +64,8 @@ def store_artifact(
         plaintext_hash=hashlib.sha256(raw).hexdigest(),
         encryption_key_version=key_version,
         payload_bytes=len(raw),
-        retention_expires_at=datetime.now(timezone.utc) + timedelta(days=settings.llm_audit_artifact_retention_days),
+        retention_expires_at=datetime.now(timezone.utc)
+        + timedelta(days=settings.llm_audit_artifact_retention_days),
     )
     session.add(artifact)
     session.flush()
@@ -92,6 +93,8 @@ def read_artifact(
     bounded_purpose = purpose.strip()[:500]
     if authorized and (not bounded_purpose or len(purpose) > 500):
         outcome = "denied"
+    elif authorized and (artifact.purged_at is not None or not artifact.encrypted_payload):
+        outcome = "purged"
     elif authorized and expires_at <= now:
         outcome = "expired"
     elif authorized:
@@ -100,7 +103,10 @@ def read_artifact(
             if active_version != artifact.encryption_key_version:
                 raise RuntimeError("Artifact key version unavailable")
             nonce, ciphertext = artifact.encrypted_payload[:12], artifact.encrypted_payload[12:]
-            aad = f"{artifact.id}:{artifact.llm_call_id}:{artifact.artifact_kind}:{artifact.encryption_key_version}".encode()
+            aad = (
+                f"{artifact.id}:{artifact.llm_call_id}:{artifact.artifact_kind}:"
+                f"{artifact.encryption_key_version}"
+            ).encode()
             raw = cipher.decrypt(nonce, ciphertext, aad)
             if hashlib.sha256(raw).hexdigest() != artifact.plaintext_hash:
                 raise InvalidTag
@@ -124,6 +130,60 @@ def read_artifact(
     )
     session.flush()
     return content, outcome
+
+
+def purge_expired_artifacts(
+    session: Session,
+    *,
+    actor_id: str,
+    now: datetime | None = None,
+    limit: int = 100,
+) -> int:
+    """Erase expired ciphertext while retaining immutable metadata and chained purge events."""
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
+    artifacts = session.scalars(
+        select(LLMExchangeArtifact)
+        .where(
+            LLMExchangeArtifact.retention_expires_at <= now,
+            LLMExchangeArtifact.purged_at.is_(None),
+            LLMExchangeArtifact.encrypted_payload != b"",
+        )
+        .order_by(LLMExchangeArtifact.retention_expires_at, LLMExchangeArtifact.id)
+        .limit(max(1, min(limit, 500)))
+        .with_for_update(skip_locked=True)
+    ).all()
+    for artifact in artifacts:
+        artifact.encrypted_payload = b""
+        artifact.purged_at = now
+        append_event(
+            session,
+            actor_type="service",
+            actor_id=actor_id,
+            action="llm_artifact_purged",
+            event_type="llm.audit.artifact_purged",
+            outcome="success",
+            resource_type="llm_exchange_artifact",
+            resource_id=artifact.id,
+            llm_call_id=artifact.llm_call_id,
+            safe_details={
+                "artifact_kind": artifact.artifact_kind,
+                "plaintext_hash": artifact.plaintext_hash,
+                "payload_bytes": artifact.payload_bytes,
+                "retention_expires_at": _timestamp(artifact.retention_expires_at),
+            },
+        )
+    session.flush()
+    return len(artifacts)
+
+
+def _timestamp(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
 
 
 def serialize_exchange(value: object) -> str:

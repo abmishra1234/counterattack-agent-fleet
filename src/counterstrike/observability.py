@@ -34,6 +34,7 @@ _SAFE_EXTRA_FIELDS = (
     "client_host",
     "local_host_allowed",
     "local_client_allowed",
+    "artifact_count",
 )
 
 
