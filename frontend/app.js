@@ -10,6 +10,12 @@ let ownerFilter = 'all';
 let usageOffset = 0;
 let usageReportOffset = 0;
 let usageLoadSequence = 0;
+let usageFilterValues = {};
+const pageDataCacheTtlMs = 30_000;
+const inventoryPageCache = new Map();
+const inventoryPageRequests = new Map();
+const usagePageCache = new Map();
+const usagePageRequests = new Map();
 let inventoryOffset = 0;
 let inventorySearch = '';
 let inventoryCriticality = '';
@@ -73,6 +79,30 @@ async function apiCollection(path) {
     offset += pageSize;
   } while (offset < total);
   return items;
+}
+
+async function cachedPageData(cache, inFlight, key, loader, forceRefresh = false) {
+  const now = Date.now();
+  const cached = cache.get(key);
+  if (!forceRefresh && cached?.expiresAt > now) {
+    cache.delete(key);
+    cache.set(key, cached);
+    return cached.value;
+  }
+  if (cached) cache.delete(key);
+  if (!forceRefresh && inFlight.has(key)) return inFlight.get(key);
+
+  const request = Promise.resolve().then(loader);
+  inFlight.set(key, request);
+  try {
+    const value = await request;
+    cache.delete(key);
+    cache.set(key, { value, expiresAt: Date.now() + pageDataCacheTtlMs });
+    while (cache.size > 20) cache.delete(cache.keys().next().value);
+    return value;
+  } finally {
+    if (inFlight.get(key) === request) inFlight.delete(key);
+  }
 }
 
 async function loadData() {
@@ -257,6 +287,8 @@ async function startManualRun(event) {
       status.textContent = `Analysis ${run.status} · ${runId}`;
       if (['succeeded', 'failed', 'partial'].includes(run.status)) {
         toast(run.status === 'succeeded' ? 'Analysis completed' : `Analysis ${run.status}`);
+        inventoryPageCache.clear();
+        usagePageCache.clear();
         await loadData();
         return;
       }
@@ -291,7 +323,7 @@ function renderAlerts() {
   bindAlertRows();
 }
 
-async function renderInventory() {
+async function renderInventory(forceRefresh = false) {
   const requestSequence = ++inventoryRequestSequence;
   const params = new URLSearchParams({ limit: '50', offset: String(inventoryOffset) });
   if (inventorySearch.trim()) params.set('search', inventorySearch.trim());
@@ -300,7 +332,14 @@ async function renderInventory() {
   if (inventoryClassification) params.set('data_classification', inventoryClassification);
   app.innerHTML = `${pageHeading('WORKSPACE / INVENTORY', 'Fleet inventory', 'Review the versioned inventory snapshot used for vulnerability correlation.')}<article class="panel table-panel"><div class="panel-header"><div class="panel-title">Loading inventory…</div></div></article>`;
   try {
-    const result = await apiGet(`/api/v1/inventory?${params.toString()}`);
+    const cacheKey = params.toString();
+    const result = await cachedPageData(
+      inventoryPageCache,
+      inventoryPageRequests,
+      cacheKey,
+      () => apiGet(`/api/v1/inventory?${cacheKey}`),
+      forceRefresh,
+    );
     if (requestSequence !== inventoryRequestSequence || activePage !== 'inventory') return;
     const items = result.items || [];
     const first = result.total ? result.offset + 1 : 0;
@@ -313,11 +352,12 @@ async function renderInventory() {
       <td>${escapeHtml(friendlyName(item.criticality))}</td><td>${item.internet_facing ? 'Internet-facing' : 'Internal'}</td>
       <td>${escapeHtml(friendlyName(item.data_classification || 'not classified'))}</td>
     </tr>`).join('') : '<tr><td colspan="7"><div class="no-results">No inventory assets match these filters.</div></td></tr>';
-    app.innerHTML = `${pageHeading('WORKSPACE / INVENTORY', 'Fleet inventory', 'Review the versioned inventory snapshot used for vulnerability correlation.')}
+    app.innerHTML = `${pageHeading('WORKSPACE / INVENTORY', 'Fleet inventory', 'Review the versioned inventory snapshot used for vulnerability correlation.', '<button class="button small" id="inventory-refresh" type="button">Refresh</button>')}
       <div class="page-toolbar"><label class="searchbox"><span aria-hidden="true">⌕</span><input id="inventory-search" type="search" placeholder="Search asset, product, service, vendor or owner" value="${escapeHtml(inventorySearch)}" aria-label="Search inventory"></label><select class="select-control" id="inventory-criticality" aria-label="Filter by criticality"><option value="">All criticalities</option>${['critical', 'high', 'medium', 'low'].map((value) => `<option value="${value}" ${inventoryCriticality === value ? 'selected' : ''}>${friendlyName(value)}</option>`).join('')}</select><select class="select-control" id="inventory-type" aria-label="Filter by asset type"><option value="">All asset types</option>${['application', 'service', 'vendor_product', 'saas'].map((value) => `<option value="${value}" ${inventoryAssetType === value ? 'selected' : ''}>${friendlyName(value)}</option>`).join('')}</select><select class="select-control" id="inventory-classification" aria-label="Filter by data classification"><option value="">All classifications</option>${['public', 'internal', 'confidential', 'restricted'].map((value) => `<option value="${value}" ${inventoryClassification === value ? 'selected' : ''}>${friendlyName(value)}</option>`).join('')}</select><span class="feed-mode">PERSISTED SNAPSHOT</span></div>
       <article class="panel table-panel"><div class="panel-header"><div><div class="panel-title">Inventory assets</div><div class="panel-subtitle">${result.snapshot_id ? `Snapshot ${escapeHtml(result.snapshot_id)}` : 'Current local inventory contract'}</div></div><span class="table-caption">${result.total} total</span></div>
       <div class="table-wrap"><table><thead><tr><th>Asset</th><th>Service / vendor</th><th>Product / installed component</th><th>Owner / contact</th><th>Criticality</th><th>Exposure</th><th>Data classification</th></tr></thead><tbody>${rows}</tbody></table></div>
       <div class="table-foot"><span>Showing ${first}–${last} of ${result.total} · Persisted run snapshot</span><div class="heading-actions"><button class="button small" id="inventory-prev" type="button" ${result.offset <= 0 ? 'disabled' : ''}>Previous</button><button class="button small" id="inventory-next" type="button" ${result.offset + items.length >= result.total ? 'disabled' : ''}>Next</button></div></div></article>`;
+    document.querySelector('#inventory-refresh').addEventListener('click', () => renderInventory(true));
     document.querySelector('#inventory-search').addEventListener('input', (event) => {
       inventorySearch = event.currentTarget.value;
       inventoryOffset = 0;
