@@ -12,7 +12,6 @@ from counterstrike.config import read_dotenv
 from counterstrike.evaluate import evaluate, gate, scorecard_md
 from counterstrike.graph import run
 from counterstrike.llm import get_llm
-from counterstrike.config import read_dotenv
 
 
 def main(argv: list[str] | None = None) -> int:

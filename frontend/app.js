@@ -8,6 +8,7 @@ let priorityFilter = 'All';
 let query = '';
 let ownerFilter = 'all';
 let usageOffset = 0;
+let usageReportOffset = 0;
 let usageLoadSequence = 0;
 
 const escapeHtml = (value = '') => String(value).replace(/[&<>"']/g, (char) => ({
@@ -346,6 +347,158 @@ function renderHealth() {
       return `<div class="agent-row"><div class="agent-name"><span class="agent-icon">&#10003;</span>${escapeHtml(friendlyName(stage.agent))}</div><div class="agent-cell">${count}<small>items</small></div><div class="agent-cell">${stage.ms ?? 'Not recorded'}<small>ms</small></div><div class="agent-cell">${stage.llm_calls ?? 0}<small>${stage.llm || 'no LLM'}</small></div><div>${statusBadge('Recorded', 'healthy')}</div></div>`;
     }).join('')}</div></article>`;
 }
+function renderUsage() {
+  app.innerHTML = `${pageHeading('OPERATIONS / MODEL AUDIT', 'LLM usage & cost', 'Review model attempts, spend estimates, usage totals and protected prompt or response artifacts.')}
+    <section class="usage-filter-panel panel">
+      <form id="llm-usage-filter" class="usage-filter-grid">
+        <label><span>Since</span><input class="usage-input" name="since" type="datetime-local"></label>
+        <label><span>Until</span><input class="usage-input" name="until" type="datetime-local"></label>
+        <label><span>Run ID</span><input class="usage-input" name="run_id" maxlength="36" placeholder="Filter by run"></label>
+        <label><span>Request ID</span><input class="usage-input" name="request_id" maxlength="64" placeholder="Filter by request"></label>
+        <label><span>Job ID</span><input class="usage-input" name="job_id" maxlength="36" placeholder="Filter by job"></label>
+        <label><span>Provider</span><input class="usage-input" name="provider" maxlength="80" placeholder="Provider"></label>
+        <label><span>Model</span><input class="usage-input" name="model" maxlength="160" placeholder="Model"></label>
+        <label><span>Task</span><input class="usage-input" name="task" maxlength="40" placeholder="extract, summarise…"></label>
+        <label><span>Advisory</span><input class="usage-input" name="advisory_id" maxlength="80" placeholder="CVE or advisory ID"></label>
+        <label><span>Actor</span><input class="usage-input" name="actor_id" maxlength="200" placeholder="Actor identity"></label>
+        <label><span>Prompt version</span><input class="usage-input" name="prompt_version" maxlength="100" placeholder="Prompt version"></label>
+        <label><span>Outcome</span><select class="select-control" name="outcome"><option value="">All outcomes</option><option value="succeeded">Succeeded</option><option value="failed">Failed</option><option value="unknown">Unknown</option><option value="pending">Pending</option></select></label>
+        <label><span>Group report by</span><select class="select-control" name="group_by"><option value="day">Day (UTC)</option><option value="run">Run</option><option value="task">Task</option><option value="provider">Provider</option><option value="model">Model</option><option value="prompt_version">Prompt version</option><option value="advisory">Advisory</option><option value="actor">Actor</option><option value="outcome">Outcome</option></select></label>
+        <button class="button primary usage-filter-submit" type="submit">Apply filters</button>
+      </form>
+    </section>
+    <div id="llm-usage-results" class="usage-results"><div class="panel loading-inline"><span class="spinner"></span>Loading usage records…</div></div>`;
+  const filter = document.querySelector('#llm-usage-filter');
+  filter.addEventListener('submit', (event) => {
+    event.preventDefault();
+    usageOffset = 0;
+    usageReportOffset = 0;
+    loadUsageResults(filter);
+  });
+  loadUsageResults(filter);
+}
+
+function usageQuery(values) {
+  const params = new URLSearchParams();
+  for (const key of ['run_id', 'request_id', 'job_id', 'provider', 'model', 'task', 'advisory_id', 'actor_id', 'prompt_version', 'outcome']) {
+    const value = String(values[key] || '').trim();
+    if (value) params.set(key, value);
+  }
+  for (const key of ['since', 'until']) {
+    if (values[key]) {
+      const date = new Date(values[key]);
+      if (!Number.isNaN(date.valueOf())) params.set(key, date.toISOString());
+    }
+  }
+  return params;
+}
+
+async function loadUsageResults(filterForm) {
+  const sequence = ++usageLoadSequence;
+  const values = Object.fromEntries(new FormData(filterForm).entries());
+  const baseParams = usageQuery(values);
+  const reportParams = new URLSearchParams(baseParams);
+  reportParams.set('group_by', values.group_by || 'day');
+  reportParams.set('limit', '50');
+  reportParams.set('offset', String(usageReportOffset));
+  const callParams = new URLSearchParams(baseParams);
+  callParams.set('limit', '25');
+  callParams.set('offset', String(usageOffset));
+  const results = document.querySelector('#llm-usage-results');
+  if (!results) return;
+  results.innerHTML = '<div class="panel loading-inline"><span class="spinner"></span>Loading usage records…</div>';
+  try {
+    const runId = String(values.run_id || '').trim();
+    const budgetPath = runId ? `/api/v1/llm/budgets?run_id=${encodeURIComponent(runId)}` : '/api/v1/llm/budgets';
+    const [usage, report, budgets] = await Promise.all([
+      apiGet(`/api/v1/llm/usage?${callParams.toString()}`),
+      apiGet(`/api/v1/llm/usage/report?${reportParams.toString()}`),
+      apiGet(budgetPath),
+    ]);
+    if (sequence !== usageLoadSequence || !document.querySelector('#llm-usage-results')) return;
+    const knownCosts = Object.entries(usage.known_cost_by_currency || {})
+      .map(([currency, amount]) => `${escapeHtml(currency)} ${escapeHtml(amount)}`).join(' · ') || 'No priced calls';
+    const month = budgets.month_to_date || {};
+    const runBudget = budgets.run || null;
+    const calls = (usage.items || []).map((item) => `<tr>
+      <td>${escapeHtml(niceDate(item.started_at))}<small class="usage-subline">${escapeHtml(item.id.slice(0, 8))} · attempt ${item.attempt_number}</small></td>
+      <td><strong>${escapeHtml(friendlyName(item.task))}</strong><small class="usage-subline">${escapeHtml(item.provider)} · ${escapeHtml(item.model)}</small></td>
+      <td>${statusBadge(friendlyName(item.outcome), item.outcome === 'succeeded' ? 'healthy' : 'review')}</td>
+      <td>${item.input_tokens ?? '—'} in · ${item.output_tokens ?? '—'} out<small class="usage-subline">${item.total_tokens ?? 'Usage unknown'} tokens</small></td>
+      <td>${item.cost_amount == null ? 'Unknown' : `${escapeHtml(item.cost_currency || 'USD')} ${escapeHtml(item.cost_amount)}`}<small class="usage-subline">Reserve ${item.budget_estimate_usd == null ? '—' : `$${escapeHtml(item.budget_estimate_usd)}`}</small></td>
+      <td class="mono">${escapeHtml(item.run_id || '—')}<small class="usage-subline">Request ${escapeHtml(item.request_id || '—')}</small></td>
+      <td><button class="button small" type="button" data-llm-call="${escapeHtml(item.id)}">Details</button></td>
+    </tr>`).join('') || '<tr><td colspan="7"><div class="no-results">No model calls match these filters.</div></td></tr>';
+    const groups = (report.groups || []).map((group) => `<tr>
+      <td>${escapeHtml(String(group.key ?? 'Unassigned'))}</td><td>${group.calls}</td><td>${group.retries}</td>
+      <td>${group.total_tokens || 0}<small class="usage-subline">${group.unknown_token_calls} calls without full token counts</small></td>
+      <td>${escapeHtml(group.currency)} ${escapeHtml(group.known_cost)}<small class="usage-subline">Reserved USD ${escapeHtml(group.budget_enforced_cost_usd)}</small></td>
+      <td>${group.unknown_outcome_calls}<small class="usage-subline">${group.pending_calls} pending</small></td>
+      <td>${group.unknown_cost_calls}</td>
+    </tr>`).join('') || '<tr><td colspan="7"><div class="no-results">No grouped usage data matches these filters.</div></td></tr>';
+    const total = Number(usage.total || 0);
+    const limit = Number(usage.limit || 25);
+    const offset = Number(usage.offset || 0);
+    results.innerHTML = `
+      <section class="usage-metrics">
+        ${metricCard('Recorded calls', report.total_calls || 0, `${report.total_retries || 0} retries`, '#3b5ccc', '↗')}
+        ${metricCard('Known cost', knownCosts, `${usage.unknown_cost_calls || 0} calls have unknown cost`, '#07856f', '$')}
+        ${metricCard('Unresolved outcome', Number(report.unknown_outcome_calls || 0) + Number(report.pending_calls || 0), `${report.unknown_outcome_calls || 0} unknown · ${report.pending_calls || 0} pending`, '#b76e0d', '!')}
+        ${metricCard('Month budget used', `$${escapeHtml(month.budget_enforced_usd || '0')}`, `${escapeHtml(friendlyName(month.limit_status || 'unknown'))} · configured ${budgets.configured_limits_usd?.per_month || 'not set'}`, '#6547c7', '◷')}
+      </section>
+      ${runBudget ? `<article class="panel usage-budget-note"><strong>Selected run budget:</strong> $${escapeHtml(runBudget.budget_enforced_usd || '0')} · ${escapeHtml(friendlyName(runBudget.limit_status || 'unknown'))} · ${runBudget.remaining_usd == null ? 'remaining amount unavailable' : `${escapeHtml(runBudget.remaining_usd)} USD remaining`}</article>` : ''}
+      <article class="panel usage-report-panel"><div class="panel-header"><div><div class="panel-title">Aggregate report</div><div class="panel-subtitle">${escapeHtml(friendlyName(report.group_by))} · ${report.total_groups} groups</div></div><span class="tag">${report.unknown_outcome_calls} unknown outcomes</span></div>
+        <div class="table-wrap"><table class="usage-table"><thead><tr><th>${escapeHtml(friendlyName(report.group_by))}</th><th>Calls</th><th>Retries</th><th>Tokens</th><th>Known cost</th><th>Unknown / pending</th><th>Unknown cost</th></tr></thead><tbody>${groups}</tbody></table></div>
+        <div class="table-foot"><span>Showing ${report.total_groups ? report.offset + 1 : 0}–${Math.min(report.offset + report.limit, report.total_groups)} of ${report.total_groups} groups</span><div class="usage-pagination"><button class="button small" type="button" id="usage-report-prev" ${report.offset <= 0 ? 'disabled' : ''}>Previous</button><button class="button small" type="button" id="usage-report-next" ${!report.has_more ? 'disabled' : ''}>Next</button></div></div>
+      </article>
+      <article class="panel usage-calls-panel"><div class="panel-header"><div><div class="panel-title">Individual attempts</div><div class="panel-subtitle">${total} calls match the filters · prompt/response content is permission-gated</div></div><span class="tag">${total ? offset + 1 : 0}–${Math.min(offset + limit, total)} of ${total}</span></div>
+        <div class="table-wrap"><table class="usage-table"><thead><tr><th>Started</th><th>Task / model</th><th>Outcome</th><th>Token usage</th><th>Cost</th><th>Run / request</th><th></th></tr></thead><tbody>${calls}</tbody></table></div>
+        <div class="table-foot"><span>Page ${Math.floor(offset / limit) + 1}</span><div class="usage-pagination"><button class="button small" type="button" id="usage-prev" ${offset <= 0 ? 'disabled' : ''}>Previous</button><button class="button small" type="button" id="usage-next" ${offset + limit >= total ? 'disabled' : ''}>Next</button></div></div>
+      </article>`;
+    results.querySelector('#usage-prev')?.addEventListener('click', () => { usageOffset = Math.max(0, offset - limit); loadUsageResults(filterForm); });
+    results.querySelector('#usage-next')?.addEventListener('click', () => { usageOffset = offset + limit; loadUsageResults(filterForm); });
+    results.querySelector('#usage-report-prev')?.addEventListener('click', () => { usageReportOffset = Math.max(0, Number(report.offset || 0) - Number(report.limit || 50)); loadUsageResults(filterForm); });
+    results.querySelector('#usage-report-next')?.addEventListener('click', () => { usageReportOffset = Number(report.offset || 0) + Number(report.limit || 50); loadUsageResults(filterForm); });
+    results.querySelectorAll('[data-llm-call]').forEach((button) => button.addEventListener('click', () => openLLMCall(button.dataset.llmCall)));
+  } catch (error) {
+    if (sequence !== usageLoadSequence || !document.querySelector('#llm-usage-results')) return;
+    results.innerHTML = `<div class="panel error-inline"><strong>Usage report unavailable</strong><p>${escapeHtml(error.message)}</p><button class="button" type="button" id="usage-retry">Retry</button></div>`;
+    results.querySelector('#usage-retry')?.addEventListener('click', () => loadUsageResults(filterForm));
+  }
+}
+
+async function openLLMCall(callId) {
+  drawerRoot.innerHTML = '<div class="drawer-backdrop" data-close-drawer></div><aside class="drawer" role="dialog" aria-modal="true"><div class="drawer-body">Loading call metadata…</div></aside>';
+  try {
+    const item = await apiGet(`/api/v1/llm/usage/${encodeURIComponent(callId)}`);
+    const contentCapability = model.capabilities.includes('llm_content');
+    const artifacts = (item.artifacts || []).map((artifact) => `<button class="button small" type="button" data-artifact-kind="${escapeHtml(artifact.kind)}">View ${escapeHtml(friendlyName(artifact.kind))}</button>`).join('');
+    drawerRoot.innerHTML = `<div class="drawer-backdrop" data-close-drawer></div><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="llm-drawer-title"><div class="drawer-head"><div class="drawer-kicker"><span>MODEL CALL · ${escapeHtml(item.id)}</span><button class="icon-button" type="button" aria-label="Close call details" data-close-drawer>&times;</button></div><h2 class="drawer-title" id="llm-drawer-title">${escapeHtml(friendlyName(item.task))}</h2><div class="drawer-subtitle">${escapeHtml(item.provider)} · ${escapeHtml(item.model)} · ${escapeHtml(friendlyName(item.outcome))}</div></div><div class="drawer-body">
+      <section class="drawer-block"><h3>Correlation</h3><div class="usage-detail-grid"><span>Run<strong>${escapeHtml(item.run_id || '—')}</strong></span><span>Request<strong>${escapeHtml(item.request_id || '—')}</strong></span><span>Job<strong>${escapeHtml(item.job_id || '—')}</strong></span><span>Actor<strong>${escapeHtml(item.actor_id || '—')}</strong></span><span>Advisory<strong>${escapeHtml(item.advisory_id || '—')}</strong></span><span>Prompt version<strong>${escapeHtml(item.prompt_version)}</strong></span><span>Prompt hash<strong>${escapeHtml(item.prompt_hash)}</strong></span><span>Attempt<strong>${item.attempt_number}</strong></span></div></section>
+      <section class="drawer-block"><h3>Usage and cost</h3><div class="review-callout">Input ${item.input_tokens ?? 'unknown'} tokens · output ${item.output_tokens ?? 'unknown'} · total ${item.total_tokens ?? 'unknown'}<br>Cost ${item.cost_amount == null ? 'unknown' : `${escapeHtml(item.cost_currency || 'USD')} ${escapeHtml(item.cost_amount)}`} · reserved USD ${item.budget_estimate_usd == null ? '—' : escapeHtml(item.budget_estimate_usd)}<br>Outcome ${escapeHtml(item.outcome)} · ${item.latency_ms ?? 'latency unavailable'} ms${item.safe_error_code ? `<br>Recorded error: ${escapeHtml(item.safe_error_code)}` : ''}</div></section>
+      <section class="drawer-block"><h3>Captured artifacts</h3>${contentCapability ? `<p class="page-description">Each read requires a purpose and is recorded in the audit log.</p><label class="field-label" for="artifact-purpose">Access purpose</label><input id="artifact-purpose" class="usage-input" minlength="8" maxlength="500" placeholder="Explain why you need to inspect this content"><div class="artifact-buttons">${artifacts || '<span class="page-description">No retained artifacts are available.</span>'}</div><pre class="artifact-content" id="artifact-content" hidden></pre>` : '<p class="page-description">Artifact content requires the LLM audit reader capability. Metadata remains visible to usage readers.</p>'}</section>
+      </div></aside>`;
+    drawerRoot.querySelectorAll('[data-close-drawer]').forEach((element) => element.addEventListener('click', closeDrawer));
+    drawerRoot.querySelectorAll('[data-artifact-kind]').forEach((button) => button.addEventListener('click', async () => {
+      const purpose = drawerRoot.querySelector('#artifact-purpose').value.trim();
+      if (purpose.length < 8) { toast('Add a specific access purpose of at least 8 characters.'); return; }
+      button.disabled = true;
+      try {
+        const result = await apiPost(`/api/v1/llm/usage/${encodeURIComponent(callId)}/content`, { kind: button.dataset.artifactKind, purpose });
+        const content = typeof result.content === 'string' ? result.content : JSON.stringify(result.content, null, 2);
+        const panel = drawerRoot.querySelector('#artifact-content');
+        panel.textContent = content;
+        panel.hidden = false;
+      } catch (error) { toast(error.message || 'Could not read captured content'); }
+      finally { button.disabled = false; }
+    }));
+    document.addEventListener('keydown', onDrawerKeydown, { once: true });
+  } catch (error) {
+    closeDrawer();
+    toast(error.message || 'Could not load model call details');
+  }
+}
+
 function bindPageLinks() {
   document.querySelectorAll('[data-go]').forEach((link) => link.addEventListener('click', () => { activePage = link.dataset.go; }));
 }
@@ -440,7 +593,7 @@ document.querySelector('#global-search').addEventListener('input', (event) => {
 window.addEventListener('hashchange', () => {
   const hash = location.hash.slice(1);
   if (hash.startsWith('alert/')) { openAlert(decodeURIComponent(hash.slice(6))); return; }
-  if (['overview', 'alerts', 'review', 'health'].includes(hash)) { activePage = hash; closeDrawer(); render(); }
+  if (['overview', 'alerts', 'review', 'health', 'usage'].includes(hash)) { activePage = hash; closeDrawer(); render(); }
   else if (!hash) { activePage = 'overview'; render(); }
 });
 loadData();

@@ -6,8 +6,8 @@ summary, and that summary is rejected if it mentions any version not in the fact
 
 from __future__ import annotations
 
-import time
 import logging
+import time
 
 from counterstrike.guards import summary_is_grounded
 from counterstrike.llm import LLMPort

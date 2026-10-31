@@ -89,7 +89,9 @@ class AdvisoryRecord(Base, TimestampMixin):
     modified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cvss: Mapped[Decimal | None] = mapped_column(Numeric(4, 2))
     source_url: Mapped[str | None] = mapped_column(Text)
-    source_references: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    source_references: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     raw_payload_hash: Mapped[str | None] = mapped_column(String(64))
     normalized_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
@@ -208,7 +210,9 @@ class MatchRecord(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False)
     advisory_id: Mapped[str] = mapped_column(ForeignKey("advisories.id"), nullable=False)
-    inventory_asset_id: Mapped[str] = mapped_column(ForeignKey("inventory_assets.id"), nullable=False)
+    inventory_asset_id: Mapped[str] = mapped_column(
+        ForeignKey("inventory_assets.id"), nullable=False
+    )
     outcome: Mapped[str] = mapped_column(String(24), nullable=False)
     confidence: Mapped[float | None] = mapped_column(Float)
     explanation: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
@@ -247,7 +251,9 @@ class AlertRecord(Base):
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     remediation: Mapped[str] = mapped_column(Text, nullable=False)
     evidence: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
-    source_references: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    source_references: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="open")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

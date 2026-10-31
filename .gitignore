@@ -18,6 +18,7 @@ env/
 *.log
 out/
 out-llm/
+backups/
 
 # Trainer-only fixtures contain hidden evaluation data; never publish them.
 grading/hidden_data/
