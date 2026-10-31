@@ -21,11 +21,7 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("run", help="run the agent fleet over a data folder")
     r.add_argument("--data", default="data")
     r.add_argument("--out", default="out")
-    r.add_argument(
-        "--llm",
-        default=None,
-        choices=["fake", "gateway", "openai_compatible", "azure_openai"],
-    )
+    r.add_argument("--llm", default=None, choices=["fake", "gateway"])
 
     e = sub.add_parser("eval", help="score a run against gold labels and enforce the gate")
     e.add_argument("--out", default="out")

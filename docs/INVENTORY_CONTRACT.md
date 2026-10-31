@@ -31,4 +31,4 @@ The local inventory input is `data/inventory.json`. Its current format is a JSON
 
 The loader temporarily accepts the previous top-level JSON array and interprets it as schema version `1.0`. New and updated inventories should use the versioned object format. Unsupported versions, empty inventories, blank required values, duplicate asset IDs, empty/duplicate aliases, and ambiguous alias mappings are rejected.
 
-The checked-in data is synthetic demo inventory, not a production inventory. The current sample has eight assets; expansion to the requirement's representative fleet size and validation against the approved organizational import remains open in tracker item `INV-01`/gap `G-03`.
+The checked-in data is synthetic demo inventory, not a production inventory. The sample contains 50 assets: 22 applications, 10 services, 8 vendor products and 10 SaaS products. Organizational import validation, persistence acceptance and browser acceptance remain open in tracker item `INV-01`/gap `G-03`.
