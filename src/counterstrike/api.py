@@ -732,6 +732,8 @@ class LLMContentReadRequest(BaseModel):
         cleaned = value.strip()
         if len(cleaned) < 8:
             raise ValueError("A specific audit purpose is required")
+        if any(ord(char) < 32 or ord(char) == 127 for char in cleaned):
+            raise ValueError("Audit purpose must not contain control characters")
         return cleaned
 
 
