@@ -7,6 +7,8 @@ let selectedReview = 0;
 let priorityFilter = 'All';
 let query = '';
 let ownerFilter = 'all';
+let usageOffset = 0;
+let usageLoadSequence = 0;
 
 const escapeHtml = (value = '') => String(value).replace(/[&<>"']/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -106,7 +108,11 @@ async function loadData() {
     document.querySelectorAll('.nav-item[data-page="review"]').forEach((item) => {
       item.hidden = !model.capabilities.includes('review');
     });
+    document.querySelectorAll('.nav-item[data-page="usage"]').forEach((item) => {
+      item.hidden = !model.capabilities.includes('usage');
+    });
     if (activePage === 'review' && !model.capabilities.includes('review')) activePage = 'overview';
+    if (activePage === 'usage' && !model.capabilities.includes('usage')) activePage = 'overview';
     document.querySelector('#top-run-status').textContent = model.lastRun ? `Latest run: ${model.lastRun}` : 'No run recorded';
     document.querySelector('.status-dot').classList.toggle('warning-dot', !model.lastRun);
     document.querySelector('#nav-alert-count').textContent = model.alerts.length;
@@ -122,10 +128,11 @@ async function loadData() {
 function render() {
   document.querySelectorAll('.nav-item').forEach((item) => item.classList.toggle('active', item.dataset.page === activePage));
   const crumb = document.querySelector('#crumb-page');
-  if (crumb) crumb.textContent = ({ overview: 'Today', alerts: 'Alerts', review: 'Needs review', health: 'Run health' })[activePage] || 'Today';
+  if (crumb) crumb.textContent = ({ overview: 'Today', alerts: 'Alerts', review: 'Needs review', health: 'Run health', usage: 'LLM usage' })[activePage] || 'Today';
   if (activePage === 'alerts') renderAlerts();
   else if (activePage === 'review') renderReview();
   else if (activePage === 'health') renderHealth();
+  else if (activePage === 'usage' && model.capabilities.includes('usage')) renderUsage();
   else { activePage = 'overview'; renderOverview(); }
   if (model.partialErrors?.length) {
     app.insertAdjacentHTML('afterbegin', `<div class="banner"><div class="banner-content"><span class="banner-icon">!</span><span><strong>Some workspace details are unavailable.</strong> ${escapeHtml(model.partialErrors.join(' | '))}</span></div></div>`);

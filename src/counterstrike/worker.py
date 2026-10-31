@@ -19,6 +19,7 @@ from counterstrike.db import session_scope
 from counterstrike.db_models import JobRecord, RunRecord
 from counterstrike.graph import run
 from counterstrike.llm import get_llm
+from counterstrike.llm_metering import mark_pending_attempts_unknown
 from counterstrike.observability import configure_logging
 from counterstrike.repositories import (
     load_source_cursors,
@@ -49,6 +50,18 @@ def claim_job(worker_id: str, lease_seconds: int = 90) -> str | None:
         job = session.scalar(query)
         if job is None:
             return None
+        if job.attempt > 0:
+            abandoned_calls = mark_pending_attempts_unknown(session, job_id=job.id)
+            if abandoned_calls:
+                logger.warning(
+                    "Recovered unresolved LLM attempts from a previous worker lease",
+                    extra={
+                        "event": "llm.call.outcome_unknown",
+                        "job_id": job.id,
+                        "run_id": job.run_id,
+                        "call_count": abandoned_calls,
+                    },
+                )
         if job.attempt >= job.max_attempts:
             job.status = "failed"
             job.completed_at = now

@@ -351,6 +351,62 @@ def _usage_value(usage: dict[str, Any], *keys: str) -> int | None:
     return None
 
 
+def _lock_pending_attempt(session: Session, attempt_id: str) -> LLMCall:
+    record = session.scalar(
+        select(LLMCall)
+        .where(LLMCall.id == attempt_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if record is None:
+        raise RuntimeError("LLM audit attempt disappeared")
+    if record.outcome != "pending":
+        raise RuntimeError("LLM attempt outcome was already finalized")
+    return record
+
+
+def mark_pending_attempts_unknown(session: Session, *, job_id: str) -> int:
+    """Finalize attempts left pending when a prior worker attempt was interrupted."""
+    now = datetime.now(timezone.utc)
+    records = session.scalars(
+        select(LLMCall)
+        .where(LLMCall.job_id == job_id, LLMCall.outcome == "pending")
+        .order_by(LLMCall.attempt_number, LLMCall.id)
+        .with_for_update()
+    ).all()
+    for record in records:
+        started_at = record.started_at
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        record.outcome = "unknown"
+        record.safe_error_code = "worker_lost_during_llm_attempt"
+        record.completed_at = now
+        record.latency_ms = max(0, round((now - started_at).total_seconds() * 1000))
+        append_event(
+            session,
+            actor_type="service",
+            actor_id=record.actor_id,
+            action="llm_attempt_abandoned",
+            event_type="llm.call.outcome_unknown",
+            outcome="unknown",
+            resource_type="llm_call",
+            resource_id=record.id,
+            request_id=record.request_id,
+            job_id=record.job_id,
+            run_id=record.run_id,
+            advisory_id=record.advisory_id,
+            llm_call_id=record.id,
+            prompt_version=record.prompt_version,
+            safe_details={
+                "task": record.task,
+                "attempt_number": record.attempt_number,
+                "reason": "worker_lease_recovered",
+            },
+        )
+    session.flush()
+    return len(records)
+
+
 def complete_attempt(
     session: Session,
     record: LLMCall,
@@ -363,6 +419,7 @@ def complete_attempt(
     parsed_output: str | None = None,
 ) -> None:
     """Persist the raw provider body and usage/cost status in caller transaction."""
+    record = _lock_pending_attempt(session, record.id)
     usage = usage or {}
     store_artifact(
         session,
@@ -461,6 +518,7 @@ def fail_attempt(
     raw_response: str | bytes | None = None,
 ) -> None:
     """Persist sanitized provider failure details and a failed attempt outcome."""
+    record = _lock_pending_attempt(session, record.id)
     if provider_secret:
         safe_error = safe_error.replace(provider_secret, "[REDACTED]")
     safe_body = redact(safe_error)[:8_000]

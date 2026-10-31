@@ -408,6 +408,8 @@ class LLMUsageReportResponse(BaseModel):
     groups: list[dict[str, Any]]
     total_calls: int
     total_retries: int
+    unknown_outcome_calls: int
+    pending_calls: int
     total_groups: int
     limit: int
     offset: int
@@ -1701,6 +1703,12 @@ def create_app(settings=None):
                 func.sum(case((LLMCall.cost_amount.is_(None), 1), else_=0)).label(
                     "unknown_cost_calls"
                 ),
+                func.sum(case((LLMCall.outcome == "unknown", 1), else_=0)).label(
+                    "unknown_outcome_calls"
+                ),
+                func.sum(case((LLMCall.outcome == "pending", 1), else_=0)).label(
+                    "pending_calls"
+                ),
             )
             .where(*conditions)
             .group_by(grouping, LLMCall.cost_currency)
@@ -1715,10 +1723,24 @@ def create_app(settings=None):
             )
             or 0
         )
+        unknown_outcome_calls = int(
+            session.scalar(
+                select(func.count(LLMCall.id)).where(*conditions, LLMCall.outcome == "unknown")
+            )
+            or 0
+        )
+        pending_calls = int(
+            session.scalar(
+                select(func.count(LLMCall.id)).where(*conditions, LLMCall.outcome == "pending")
+            )
+            or 0
+        )
         return {
             "group_by": group_by,
             "total_calls": total,
             "total_retries": total_retries,
+            "unknown_outcome_calls": unknown_outcome_calls,
+            "pending_calls": pending_calls,
             "total_groups": total_groups,
             "limit": limit,
             "offset": offset,
@@ -1739,6 +1761,8 @@ def create_app(settings=None):
                     ),
                     "budget_enforced_cost_usd": format(row.budget_enforced_cost or Decimal(0), "f"),
                     "unknown_cost_calls": int(row.unknown_cost_calls or 0),
+                    "unknown_outcome_calls": int(row.unknown_outcome_calls or 0),
+                    "pending_calls": int(row.pending_calls or 0),
                 }
                 for row in rows
             ],
