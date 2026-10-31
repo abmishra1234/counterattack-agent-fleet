@@ -1251,7 +1251,9 @@ def create_app(settings=None):
 
     @app.get("/api/v1/runs", response_model=RunListResponse, tags=["runs"])
     def list_runs(
-        status: str | None = Query(default=None, max_length=32),
+        status: Literal["queued", "running", "succeeded", "failed"] | None = Query(
+            default=None
+        ),
         limit: int = Query(default=25, ge=1, le=100),
         offset: int = Query(default=0, ge=0, le=1000000),
         session=Depends(db_session),
@@ -1428,7 +1430,7 @@ def create_app(settings=None):
 
     @app.get("/api/v1/reviews", response_model=ReviewListResponse, tags=["reviews"])
     def list_reviews(
-        state: str | None = Query(default=None, max_length=24),
+        state: Literal["open", "resolved"] | None = Query(default=None),
         run_id: str | None = Query(default=None, max_length=36),
         limit: int = Query(default=25, ge=1, le=100),
         offset: int = Query(default=0, ge=0, le=1000000),
@@ -1921,7 +1923,7 @@ def create_app(settings=None):
 
     @app.get("/api/v1/alerts", response_model=AlertListResponse, tags=["alerts"])
     def list_alerts(
-        priority: str | None = Query(default=None, max_length=2),
+        priority: Literal["P1", "P2", "P3", "P4"] | None = Query(default=None),
         owner: str | None = Query(default=None, max_length=200),
         service: str | None = Query(default=None, max_length=200),
         search: str | None = Query(default=None, max_length=200),
