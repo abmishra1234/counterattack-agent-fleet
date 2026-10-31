@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from counterstrike.audit import append_event
 from counterstrike.config import Settings
@@ -111,6 +111,23 @@ def enqueue_source_poll(settings: Settings) -> bool:
         return False
 
 
+def _enqueue_source_poll_observed(settings: Settings) -> bool:
+    """Log failed schedule attempts without exposing exception text or credentials."""
+    try:
+        return enqueue_source_poll(settings)
+    except Exception as exc:
+        error_code = "database_error" if isinstance(exc, SQLAlchemyError) else type(exc).__name__
+        logger.error(
+            "Public feed schedule enqueue failed",
+            extra={
+                "event": "source.schedule.enqueue_failed",
+                "interval_minutes": settings.public_feed_poll_interval_minutes,
+                "error_code": error_code[:80],
+            },
+        )
+        raise
+
+
 def start_source_scheduler(settings: Settings) -> BackgroundScheduler | None:
     """Start the interval scheduler only after all source and database gates pass."""
     if not settings.public_feed_scheduler_enabled:
@@ -128,7 +145,7 @@ def start_source_scheduler(settings: Settings) -> BackgroundScheduler | None:
     first_run = datetime.fromtimestamp(next_epoch, tz=timezone.utc)
     scheduler = BackgroundScheduler(timezone=timezone.utc)
     scheduler.add_job(
-        enqueue_source_poll,
+        _enqueue_source_poll_observed,
         trigger="interval",
         seconds=interval_seconds,
         start_date=first_run,
