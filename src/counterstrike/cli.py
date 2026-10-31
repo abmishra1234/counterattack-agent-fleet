@@ -8,7 +8,6 @@ import os
 import sys
 from pathlib import Path
 
-from counterstrike.config import read_dotenv
 from counterstrike.evaluate import evaluate, gate, scorecard_md
 from counterstrike.graph import run
 from counterstrike.llm import get_llm
@@ -32,18 +31,8 @@ def main(argv: list[str] | None = None) -> int:
 
     args = p.parse_args(argv)
     if args.cmd == "run":
-        dotenv = read_dotenv()
-        provider = args.llm or os.environ.get(
-            "LLM_PROVIDER",
-            os.environ.get(
-                "COUNTERSTRIKE_LLM",
-                dotenv.get("LLM_PROVIDER", dotenv.get("COUNTERSTRIKE_LLM", "fake")),
-            ),
-        )
-        if provider in {"openai_compatible", "azure_openai"}:
-            provider = "gateway"
         try:
-            llm = get_llm(provider)
+            llm = get_llm(args.llm)
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2

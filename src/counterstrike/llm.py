@@ -470,6 +470,12 @@ def get_llm(
     if kind == "fake":
         return FakeLLM()
     settings = settings or load_settings()
+    # A configured remote provider describes the transport to use after the
+    # live-call gates are approved. Until then, implicit runtime selection
+    # must remain offline-capable so worker runs can still use the default
+    # deterministic provider without attempting a network request.
+    if kind is None and not settings.llm_live_calls_enabled:
+        return FakeLLM()
     provider = kind or settings.llm_provider
     if provider in {"gateway", "openai_compatible", "azure_openai"}:
         return GatewayLLM(

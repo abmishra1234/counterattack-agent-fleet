@@ -1389,7 +1389,7 @@ def create_app(settings=None):
             }
 
     @app.get("/api/v1/runs/{run_id}", response_model=RunDetailResponse, tags=["runs"])
-    def run_detail(run_id, session=Depends(db_session)):
+    def run_detail(run_id: str, session=Depends(db_session)):
         record = session.get(RunRecord, run_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Run not found")
@@ -1976,7 +1976,7 @@ def create_app(settings=None):
         }
 
     @app.get("/api/v1/alerts/{alert_id}", response_model=AlertDetailResponse, tags=["alerts"])
-    def alert_detail(alert_id, session=Depends(db_session)):
+    def alert_detail(alert_id: str, session=Depends(db_session)):
         record = session.get(AlertRecord, alert_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Alert not found")
@@ -2489,7 +2489,7 @@ def create_app(settings=None):
     @app.get(
         "/api/v1/llm/usage/{call_id}", response_model=LLMCallDetailResponse, tags=["llm-usage"]
     )
-    def llm_call_detail(call_id, session=Depends(db_session)):
+    def llm_call_detail(call_id: str, session=Depends(db_session)):
         record = session.get(LLMCall, call_id)
         if record is None:
             raise HTTPException(status_code=404, detail="LLM call not found")
@@ -2520,7 +2520,11 @@ def create_app(settings=None):
         response_model=LLMContentReadResponse,
         tags=["llm-usage"],
     )
-    def read_llm_content(call_id, request_body: LLMContentReadRequest, session=Depends(db_session)):
+    def read_llm_content(
+        call_id: str,
+        request_body: LLMContentReadRequest,
+        session=Depends(db_session),
+    ):
         from counterstrike.artifacts import read_artifact
 
         record = session.get(LLMCall, call_id)
