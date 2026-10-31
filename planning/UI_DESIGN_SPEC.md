@@ -285,10 +285,10 @@ Use a cool, trustworthy enterprise palette: deep navy for the application frame,
 | `text-primary` | `#172B4D` | Main text |
 | `text-secondary` | `#52657A` | Supporting labels and metadata |
 | `p1` | `#B42318` | P1 badge and urgent state; pair with pale red `#FEE4E2` |
-| `p2` | `#C2410C` | P2 badge; pair with pale orange `#FFEDD5` |
-| `p3` | `#A16207` | P3 badge; pair with pale amber `#FEF3C7` |
+| `p2` | `#9A3412` | P2 text/icon; pair with pale orange `#FFEDD5` |
+| `p3` | `#854D0E` | P3 text/icon; pair with pale amber `#FEF3C7` |
 | `p4` | `#475569` | P4 badge; pair with pale slate `#E2E8F0` |
-| `success` | `#15803D` | Healthy / completed state; pair with pale green `#DCFCE7` |
+| `success` | `#166534` | Healthy / completed text; pair with pale green `#DCFCE7` |
 | `warning` | `#A16207` | Degraded / needs attention; pair with pale amber `#FEF3C7` |
 | `error` | `#B42318` | Failed state; pair with pale red `#FEE4E2` |
 
@@ -297,6 +297,7 @@ Use a cool, trustworthy enterprise palette: deep navy for the application frame,
 - Sidebar and top bar use navy with white text. Active navigation uses `blue-050`, `blue-700` text and a narrow `blue-700` edge.
 - Primary buttons use `blue-700` with white text. Secondary buttons use a white background, `border` outline and navy text. Links use `blue-700` and remain underlined on hover/focus.
 - P1–P4 badges use the matching dark foreground on a pale tinted background; use bold text such as `P1 · Critical`. Do not use white-on-saturated red/orange for small text.
+- Use the token foreground on its paired pale background for labels; keep all small text at or above 4.5:1 contrast. Verify actual rendered combinations before shipping.
 - Affected uses a pale red/rose treatment only when it represents an actual confirmed finding. Possibly affected / Needs review uses amber. Not affected uses pale green. Informational metadata uses blue or slate.
 - Healthy, degraded and failed feed states pair a colored dot with the word **Healthy**, **Degraded** or **Failed**. Keep the dot at least 8 px and never rely on it alone.
 - Keep card backgrounds white, with 1 px borders and subtle shadows only on floating elements such as the detail drawer. Avoid gradients and color-filled metric cards.
@@ -309,6 +310,19 @@ Use a cool, trustworthy enterprise palette: deep navy for the application frame,
 - Tables use 48 px rows, 12–14 px text, a pale slate header row and light horizontal separators. Highlight hover with `#F8FAFC`; selected row uses `blue-050`.
 - Priority badges, outcome labels and AI-summary labels have distinct shapes and text. Do not make the AI label look like severity.
 - Keep CVE IDs, version numbers/ranges and asset IDs in monospace. Truncate long text with a visible title/expand action; never truncate the recommendation or source URL without a way to inspect it.
+
+| Component | Default appearance | Interaction / state |
+|---|---|---|
+| Primary button | Blue `#1D4ED8`, white text, 40 px minimum height, 6 px radius | Hover: darker blue; focus: 2 px blue outline with offset; disabled: slate text on `#E2E8F0` and no action |
+| Secondary button | White surface, 1 px `#D9E2EC` border, navy text | Hover: `#F8FAFC`; focus matches primary; use for low-risk secondary actions |
+| Priority badge | P1–P4 dark text on corresponding pale status tint | Always includes priority text; no animation or pulsing |
+| Navigation item | Navy text on transparent background | Active: blue text + pale blue fill + 3 px blue left rule; hover: `#F8FAFC` |
+| Table row | White surface with subtle horizontal separator | Hover: `#F8FAFC`; selected: `#EFF6FF` plus blue left accent; focus available by keyboard |
+| Input/filter | White surface, slate border, visible label above | Focus: blue outline; invalid: red border plus plain-language error below |
+| Status banner | Pale blue/amber/red background with matching dark text and icon | Stays visible until the condition clears or the user navigates to the detail that explains it |
+| Detail drawer | White panel, 440 px target width, light shadow | Close button has visible label or accessible name; Escape closes only when focus returns to the selected row |
+
+Only one control in a section should use the primary button style. Do not color **Not affected** red: it is a review decision, not a destructive action.
 
 ### 9.3 Accessibility and page states
 
