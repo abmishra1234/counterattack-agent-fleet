@@ -289,6 +289,8 @@ Completed items are `PLN-01`, `FND-01`/`FND-03`/`FND-04`/`FND-05`, `WKR-01`, `AP
 
 | 2026-10-31 | DB-03, OPS-02 | Rechecked the reported Compose migration startup failure. | The existing `migrate` container had exited 0; a fresh `docker compose run --rm migrate` reran `alembic upgrade head` successfully (exit 0). Post-rerun, the database remained healthy and API healthy. The reported failure did not reproduce, so its original transient trigger is unknown; capture full migration logs if it recurs. No automated tests were run. |
 
+| 2026-10-31 | API-07 | Rechecked persisted inventory filters against the running PostgreSQL API. | `GET /api/v1/inventory?limit=2` returned the latest persisted snapshot; `asset_type=application` returned 22 matches and `data_classification=confidential` returned 21. Invalid enum values for both filters returned 422. The UI/browser rendering and direct audit-event query acceptance remain open. No automated tests were run. |
+
 ## Next work
 
 1. Finish API contract review against the strategy and frontend DTO use; verify generated OpenAPI for all action endpoints and complete browser/API acceptance. Review, run-specific source status, advisory context, asset posture, alert score breakdown, source references, match explanation, and impact summary now have explicit DTO/UI coverage; remaining evidence fields need review, followed by runtime and browser acceptance.
