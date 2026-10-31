@@ -39,7 +39,7 @@ const checkedHttpUrl = (value) => {
 const niceDate = (value) => value ? new Date(value).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'Not recorded';
 const friendlyName = (value = '') => value.split(/[-_]/).map((part) => part ? part[0].toUpperCase() + part.slice(1) : '').join(' ');
 const priorityClass = (priority = 'P4') => `priority-${priority}`;
-const pipelineStepName = (stage = {}) => stage.agent === 'ingest' && stage.source_id === 'fixture-json' ? 'Fixture Feed' : friendlyName(stage.agent || 'Unknown step');
+const pipelineStepName = (stage = {}) => stage.source_id === 'fixture-json' || stage.agent === 'fixture_feed' ? 'Fixture Feed' : friendlyName(stage.agent || 'Unknown step');
 const pipelineStepMetric = (stage = {}) => stage.ms != null ? `${stage.ms} ms` : stage.source_status ? friendlyName(stage.source_status) : 'Timing unavailable';
 const pipelineStepOutput = (stage = {}) => {
   if (stage.agent === 'ingest') {

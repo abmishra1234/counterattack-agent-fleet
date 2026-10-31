@@ -57,7 +57,9 @@ def ingest_agent(
         kev_complete = True
         source_trace.append(
             {
-                "agent": "ingest",
+                # Fixture loading is a source activity, not a second execution of
+                # the ingest agent. Keep it distinct in persisted run traces.
+                "agent": "fixture_feed",
                 "source_id": feed_batch.source_id,
                 "source_status": "success",
                 "fetched_at": feed_batch.fetched_at.isoformat(),

@@ -1400,7 +1400,11 @@ def create_app(settings=None):
         trace = summary.get("trace", [])
         safe_trace = [
             {
-                key: _safe_run_trace_value(key, item[key])
+                key: (
+                    "fixture_feed"
+                    if key == "agent" and item.get("source_id") == "fixture-json"
+                    else _safe_run_trace_value(key, item[key])
+                )
                 for key in (
                     "agent",
                     "source_id",
