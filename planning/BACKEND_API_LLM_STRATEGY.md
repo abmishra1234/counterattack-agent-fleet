@@ -1,0 +1,241 @@
+# Backend API and LLM Integration Strategy
+
+**Decision status: Proposed — awaiting stakeholder approval before implementation.**  
+**Purpose:** Freeze a practical backend, API, persistence, and LLM design for the Counterstrike agent fleet, then implement against the approved contract.
+
+## 1. Recommendation
+
+Build a Python API and worker around the existing LangGraph pipeline. Use FastAPI for the HTTP boundary, PostgreSQL for durable run and audit state, SQLAlchemy 2.x with Alembic for persistence and schema changes, and a separate worker process for scheduled ingestion and user-triggered runs. Keep the existing `LLMPort` seam: deterministic code retains control of matching, scoring, priority, remediation facts, and dispatch decisions; a configured model may extract candidate facts from bulletins and draft grounded prose only.
+
+The API will serve the current frontend from the same origin and provide versioned read and action endpoints. The existing JSON fixtures and CLI remain available for offline development and evaluation. The API will not connect to or modify managed assets. External feed and notification adapters are independent integrations with explicit enablement and audit records.
+
+This proposal covers the Must gaps summarized in [the updated requirement gap plan](UPDATED_REQUIREMENT_GAP_PLAN.md) and preserves the boundaries recorded in [the current decision log](../DECISION_LOG.md). The [Counterstrike Agents Fleet Requirements](../requirement/Counterstrike_Agents_Fleet_Requirements.docx) remains the authority if it conflicts with this strategy.
+
+## 2. Goals and boundaries
+
+### In scope for the backend foundation
+
+- Serve the dashboard and provide stable, documented APIs for dashboard data, alerts, human review, run history, and service health.
+- Start a fleet run on demand and on a configured polling schedule; track its status, inputs, timing, trace, and outcome durably.
+- Make source ingestion idempotent, independently observable, and resilient to an individual source outage.
+- Persist normalized advisory, inventory, correlation, alert, review, source checkpoint, and audit records.
+- Support the approved LLM through configuration without changing the `LLMPort` contract or allowing model output to make security decisions.
+- Use `.env` for local configuration, `.env.example` for safe documented placeholders, and deployment secrets for hosted environments.
+- Keep fixture-based runs deterministic and offline in CI.
+
+### Explicit boundaries
+
+- The fleet remains advisory and read-only with respect to target assets. No patching, configuration changes, or shell/SSH execution is introduced.
+- Model keys, prompts containing sensitive values, and raw authorization headers are never returned by an API or written to run/audit logs.
+- The initial API is an internal/demo service. Public internet exposure and multi-tenant authorization are out of scope until identity, role, and network requirements are approved.
+- Teams/email delivery can be implemented behind a durable outbox and disabled by default. Actual external sends require configured destinations and explicit deployment enablement.
+- Ticket creation, vendor scraping, and feedback-based model training remain outside the initial backend slice unless the requirement owner re-scopes them.
+
+## 3. Proposed technology decisions
+
+| Concern | Proposed choice | Why it fits this repository | Consequence / alternative rejected |
+|---|---|---|---|
+| API framework | **FastAPI + Uvicorn** | Python service matches the existing agent code and Pydantic contracts; typed request/response models and generated OpenAPI make the API easy to inspect. | Adds an ASGI runtime and API dependencies. A handwritten `http.server` implementation is smaller but would make validation, API documentation, and middleware less maintainable. |
+| API schemas | **Pydantic v2** | Already used for advisory, asset, alert, and match validation. Reuse the domain models and add explicit API DTOs. | Avoid exposing internal LangGraph state directly; API DTOs form a stable boundary. |
+| Durable storage | **PostgreSQL** | Supports durable run history, source checkpoints, human decisions, audit events, and a database-backed work queue. Fits the required containerized deployment direction. | Requires a database service. JSON files remain the fixture/import/export format, not the authoritative live store. SQLite is limited to fast isolated tests only. |
+| Persistence and migrations | **SQLAlchemy 2.x + Alembic + psycopg 3** | Familiar Python persistence stack, explicit schema evolution, and a PostgreSQL driver. Start with synchronous sessions because LangGraph and current agents are synchronous. | Async ORM is deferred until measurements show a need; it would add coordination across the API, graph, and DB code. |
+| Run queue | **PostgreSQL-backed jobs table, claimed with row locks** | Durable manual and scheduled jobs without adding Redis/Celery for the current throughput. A dedicated worker claims jobs and records attempts/status. | Start with one active worker for deterministic output and safe shared state. Add Redis/Celery only if measured queue throughput or isolation needs justify another service. |
+| Scheduler | **APScheduler in the dedicated worker process** | Direct fit for the 15-minute polling interpretation in the gap plan; keeps scheduling out of API web workers. | Run exactly one scheduler instance in the deployment. Job table uniqueness/leases prevent duplicate schedules. For multi-replica scheduling, replace with a platform scheduler or distributed scheduler after approval. |
+| External HTTP | **HTTPX with explicit connect/read/write/pool timeouts and bounded retries** | Shared client for feed and model adapters; enables explicit timeout policy. | Retries are limited to safe transient failures and honor rate limits; no unbounded retries. |
+| LLM integration | **Keep `LLMPort`; retain `FakeLLM`; harden the OpenAI-compatible gateway adapter** | Existing agents already depend on a provider-neutral port and CI uses `FakeLLM`. It is the lowest-risk route to live calls. | Azure OpenAI endpoint details must be confirmed. Use the OpenAI-compatible API shape only if the approved Azure deployment supports it; otherwise add a separate Azure adapter behind the same port. |
+| Frontend delivery | **FastAPI serves `frontend/` and `/api/v1/*` from one origin** | No browser CORS setup or second server is needed; the current static UI remains build-free. | Replace the Node preview data server after the Python API is ready. Keep local Node preview only until migration is complete. |
+| Packaging/local run | **Existing `pyproject.toml`; Docker Compose for API, worker, and PostgreSQL** | Keeps dependencies and commands in the Python project and supports a repeatable demo. | CI and Compose secrets must be injected from environment; `.env` is local-only and excluded from version control. |
+
+FastAPI’s dependency model and generated API schema support the proposed typed HTTP boundary ([FastAPI dependencies](https://fastapi.tiangolo.com/tutorial/dependencies/), [FastAPI security](https://fastapi.tiangolo.com/tutorial/security/)). SQLAlchemy’s 2.x ORM provides the persistence layer ([SQLAlchemy ORM](https://docs.sqlalchemy.org/en/20/orm/)). HTTPX supports explicit operation timeouts ([HTTPX timeouts](https://www.python-httpx.org/advanced/timeouts/)). APScheduler’s user guide documents scheduled jobs and job behavior ([APScheduler 3.x guide](https://apscheduler.readthedocs.io/en/3.x/userguide.html)). These links are technical references, not a commitment to specific dependency patch versions.
+
+## 4. Target runtime layout
+
+```text
+Browser
+  └── FastAPI / Uvicorn
+        ├── serves frontend static files
+        ├── validates /api/v1 requests and returns DTOs
+        ├── reads PostgreSQL for alerts, review, run, and dashboard views
+        └── enqueues manual work in PostgreSQL
+
+Worker process
+  ├── APScheduler enqueues periodic source-poll jobs
+  ├── claims queued jobs from PostgreSQL
+  ├── invokes source adapters and existing LangGraph fleet
+  ├── stores normalized results, audit events, and outbox records
+  └── makes LLM calls only through LLMPort
+
+PostgreSQL
+  ├── advisory and enrichment records
+  ├── inventory snapshots
+  ├── runs, jobs, and source checkpoints
+  ├── matches, alerts, and analyst review decisions
+  └── append-only audit events and delivery outbox
+```
+
+The API process must not execute a full model-backed graph synchronously inside a request. `POST /runs` validates and queues work, then returns `202 Accepted` with a run identifier. The worker runs the graph and updates durable state. This keeps HTTP responsive when a source or model is slow.
+
+## 5. Proposed API contract
+
+All paths below are under `/api/v1`. JSON timestamps use UTC ISO 8601. Collection endpoints use bounded `limit` and `offset` pagination. Responses contain stable IDs and never include credentials or internal filesystem paths.
+
+| Method and path | Purpose | Response / behavior |
+|---|---|---|
+| `GET /health/live` | Process liveness | `200` if the API process is running. No DB dependency. |
+| `GET /health/ready` | Service readiness | `200` when DB and migrations are available; otherwise `503` with safe dependency status. |
+| `GET /dashboard` | Overview page aggregate | Latest run, priority counts, affected asset count, review count, and selected latest findings. |
+| `GET /alerts` | Alert list | Filter by `priority`, `owner`, `service`, `search`, `since`, and bounded pagination; sorted by priority/risk/time. |
+| `GET /alerts/{alert_id}` | Alert detail | Alert facts, score breakdown/policy version, source references, evidence, and latest run association. |
+| `GET /reviews` | Analyst queue | Open, resolved, and filtered human-review cases with reason and source evidence. |
+| `POST /reviews/{review_id}/decision` | Record analyst disposition | Validated disposition and note; appends an audit event. It does not suppress an existing alert without an explicit, separately audited action. |
+| `GET /runs` | Run history | Paginated status, trigger, timestamps, and summary counts. |
+| `POST /runs` | Queue a manual run | `202` plus `run_id`, status URL, and accepted timestamp. Accepts an approved trigger/input scope only; no arbitrary filesystem paths. |
+| `GET /runs/{run_id}` | Run status and trace | Pending/running/succeeded/partial/failed, stage trace, source fetch results, safe error codes, and counts. |
+| `GET /sources` | Feed status | Source enabled state, last attempt/success, checkpoint, and latest safe error category. |
+| `GET /openapi.json` | Machine-readable API contract | Generated from API DTOs. Interactive docs are enabled only for local/dev unless explicitly approved for deployment. |
+
+### API rules
+
+- `400` for invalid filters/payloads; `404` for unknown IDs; `409` for conflicting run/review transitions; `422` for schema validation; `429` for configured rate limiting; `503` for temporary service dependency failures.
+- Validate all IDs, enum values, string lengths, pagination bounds, and request body size.
+- Do not accept arbitrary data/output directories or caller-supplied model/provider URLs through the API.
+- Require an `Idempotency-Key` for manual run creation; return the existing job response for a duplicate key. The worker also de-duplicates scheduled run windows and source advisory keys.
+- Human-review decisions carry reviewer identity from authenticated context, never a caller-provided identity field. Local demo may use an explicitly labelled development identity until real SSO is agreed.
+- API authentication is a deployment gate. Local development can bind to loopback; shared or hosted deployments require approved OIDC/SSO and role checks before enabling run/review actions.
+
+## 6. Persistence model and ownership
+
+| Record | Minimum fields | Reason |
+|---|---|---|
+| `source` / `source_checkpoint` | name, enabled, last attempt/success, cursor/modified time, failure count | Independent feed polling and restart-safe checkpoints. |
+| `advisory` | canonical ID, vendor/source IDs, title, publication/modified times, CVSS, affected ranges, references, raw-source hash | De-duplication and source provenance. Store raw source payload only if retention/security policy permits. |
+| `enrichment` | advisory ID, EPSS score/percentile, KEV status, source, observed time | Make each enrichment value auditable and freshness-aware. |
+| `inventory_asset` / `inventory_snapshot` | asset/service, vendor/product/component, version, owner/contact, criticality, exposure, data classification, effective time | Version inventory input and preserve the basis for past decisions. Keep sensitive inventory data local. |
+| `run` | ID, trigger, status, start/end, config/policy/prompt versions, counts, safe failure summary | User-visible run history and reconstructable analysis. |
+| `job` | ID, type, run ID, queued/claimed/completed timestamps, attempt, lease, idempotency key | Durable queue for API and scheduler work. |
+| `match` | advisory/asset IDs, outcome, confidence, evidence, comparator | Distinguish affected, possible, and not affected results. |
+| `alert` | current `Alert` fields plus match/run IDs, references, score breakdown, policy version, status timestamps | Dashboard and notification payload. |
+| `review_case` / `review_decision` | case, reason, stage, state, reviewer, disposition, note, timestamps | Durable human queue and accountable decisions. Decisions are append-only. |
+| `audit_event` | event ID/time, actor/system, run/advisory/asset IDs, event type, before/after hashes or safe summary, source/evidence refs | Reconstruct the pipeline without storing secrets or unnecessary bulletin text. Append-only at the application layer. |
+| `outbox_message` | event key, channel, recipient reference, payload hash, status, attempts, next retry, provider response code | Future Teams/email delivery with idempotency and dead-letter visibility. |
+
+Persist an inventory snapshot/version with each run. A later inventory change must not silently rewrite the facts behind an old alert. Keep `out/` JSON exports for CLI/eval compatibility and optionally produce a run export from persisted records.
+
+## 7. LLM integration and safety contract
+
+### Provider decision
+
+Retain `LLMPort`, `FakeLLM`, and the existing `GatewayLLM` behavior as the compatibility baseline. Refactor provider creation into validated settings and adapters without putting provider-specific code into agents. Configure provider as `fake` or `openai_compatible` for the first implementation. Confirm the approved Azure endpoint shape before enabling production calls; add an `azure_openai` adapter if the endpoint is not OpenAI-compatible.
+
+### Configuration shape
+
+Local `.env` is read at process startup; real `.env` files remain ignored by Git. `.env.example` documents only names, safe defaults, and fake placeholder values:
+
+```dotenv
+# API and worker
+COUNTERSTRIKE_ENV=development
+API_HOST=127.0.0.1
+API_PORT=8000
+DATABASE_URL=postgresql+psycopg://counterstrike:change-me@localhost:5432/counterstrike
+DATA_DIR=data
+OUT_DIR=out
+POLL_INTERVAL_MINUTES=15
+
+# LLM: keep fake as the safe offline default
+LLM_PROVIDER=fake
+LLM_BASE_URL=https://gateway.example.invalid/v1
+LLM_API_KEY=replace-with-secret
+LLM_MODEL=replace-with-approved-model
+LLM_TIMEOUT_SECONDS=30
+LLM_MAX_RETRIES=2
+LLM_MAX_OUTPUT_TOKENS=1200
+LLM_EXTRACTION_ENABLED=true
+LLM_SUMMARY_ENABLED=true
+```
+
+No committed `.env` contains a working API key. `.env.example` must not look like a usable secret. Hosted environments inject `DATABASE_URL` and `LLM_API_KEY` from the platform secret store; logs and API responses expose only provider/model labels after redaction, never the key or full secret-bearing URL.
+
+### Call behavior
+
+- Extraction remains limited to untrusted bulletin text plus the approved product vocabulary. Do not send inventory owner, service, internal hostname, or contact data to the model for extraction.
+- Summary generation receives only the minimum facts already used by `remediate_agent`; do not expand the prompt with asset contacts or unrelated inventory context.
+- Preserve schema validation, literal/evidence grounding, version checks, injection detection, and deterministic fallback. A provider error, timeout, invalid JSON, or grounding failure must route to fallback/human review according to task type; it must not mark a case unaffected.
+- Set temperature to zero and enforce an output-token cap. Apply explicit request timeout and at most the configured bounded retries for transient network/server errors. Do not retry authentication, invalid request, or schema failures.
+- Record provider name, model/deployment label, prompt version, elapsed time, token usage if provided, retry count, and result category. Never record API key, authorization header, or full prompt payload in standard logs.
+- Default CI and local `.env.example` to `fake`. Live model smoke tests are opt-in and cannot be a requirement for offline evaluation.
+
+## 8. Feed and worker behavior
+
+The source adapters normalize NVD, CISA KEV, OSV, and EPSS inputs into source-aware domain records; the exact first three production sources and access requirements must be confirmed. Keep fixture JSON as an adapter used by tests and offline evaluation.
+
+1. Scheduler creates a unique poll job for each source/window; the DB uniqueness key prevents duplicate scheduled work.
+2. Worker claims one job with a lease and records an attempt before calling a source.
+3. Adapter makes bounded HTTP requests, honors rate limits/`Retry-After`, validates payloads, and records source-specific success/failure. A failing feed does not block other source jobs.
+4. Normalize identifiers and upsert advisories/enrichment idempotently. Save checkpoint only after successfully processing the corresponding page/window.
+5. A run is marked `partial` if a required source fails but the remaining work completes; status retains per-source evidence and safe failure categories.
+6. After ingestion and enrichment, invoke the existing deterministic LangGraph stages. Persist results transactionally by run; write audit events for stage decisions and include the policy/prompt versions.
+7. Worker commits an outbox record for each intended delivery; a separate delivery loop sends only when a channel is enabled. Repeated jobs reuse stable idempotency keys.
+
+Initial scheduling follows the gap plan’s 15-minute interpretation. Make the interval configurable and record it in run metadata. Polling interval, feed API limits, and source-specific retention need operator approval before deployment.
+
+## 9. Security, privacy, and operational controls
+
+- Local API defaults to loopback. Production API must use TLS through the deployment ingress and approved OIDC/SSO roles: read-only dashboard, analyst review, and operator run/config permissions.
+- Worker and API use separate least-privilege DB roles where practical. The worker may write run results; the API may read and enqueue. Audit storage denies update/delete to application paths.
+- Validate model and feed URLs at startup from trusted configuration. Never let an HTTP request choose a URL, model deployment, filesystem path, or credential.
+- Request limits, bounded pagination, timeouts, retry caps, and job leases prevent unbounded work. Health endpoints return dependency status without secrets or internal stack traces.
+- Use structured logs with correlation IDs (`request_id`, `run_id`, `source_id`), redaction filters, UTC timestamps, and no raw key/prompt/inventory dumps.
+- Keep raw source retention configurable and documented. Do not log or expose personally identifying owner contacts beyond the role-authorized response.
+- Use migrations as the only schema-change mechanism; backups and restore checks are deployment requirements before production data is used.
+- Store generated recommendations with references and evidence. Unsupported advice is withheld or flagged for human review; the LLM cannot invent or replace references.
+
+## 10. Frontend integration plan
+
+The current `frontend/app.js` expects a single `/api/data` bundle and the Node server reads `out/` plus fixture files. During migration:
+
+1. Implement `/api/v1/dashboard`, `/alerts`, `/reviews`, `/runs`, and `/health/*` with fixture-backed repository adapters first.
+2. Change frontend calls to the versioned endpoints (or provide a temporary compatibility `/api/data` adapter) and render loading, empty, partial, error, and stale-run states.
+3. Add a visible `Run analysis` action that submits an idempotent `POST /runs`, then polls the run status. Keep destructive asset actions absent.
+4. Serve the static frontend through FastAPI in local and Compose runs; remove reliance on the Node static-data API after parity is verified.
+5. Make review submission explicit with confirmation, disposition, note, and reviewer identity from the auth context.
+
+## 11. Implementation phases and gates
+
+| Phase | Deliverable | Gate before next phase |
+|---|---|---|
+| 0. Freeze this design | Confirm endpoints, provider, data boundary, auth mode, storage, and first-source list. | Requirement owner approves this decision document; unresolved choices are marked as deferred rather than silently assumed. |
+| 1. Settings and API skeleton | Typed settings loader, `.env.example`, FastAPI app, error envelope, OpenAPI, health endpoints, same-origin static serving. | Startup validation works without a key in fake mode; secret values never appear in errors. |
+| 2. Database and run/job model | SQLAlchemy models, Alembic baseline, repositories, job lease/idempotency. | Migration creates clean DB; restart does not lose job/run history; duplicate request creates one run. |
+| 3. Read APIs and frontend migration | Dashboard, alerts/detail, reviews, runs, source health; UI migrated to API. | API/UI counts match fixture CLI output; filters, empty, loading, failed, partial states are legible. |
+| 4. Worker and LLM | Worker executes LangGraph; harden gateway client and keep FakeLLM. | Offline fixtures pass unchanged; provider timeout/schema/adversarial cases safely fall back; no model-owned priority or match. |
+| 5. Feed adapters and schedule | Source adapters, checkpoints, deduplication, APScheduler in worker. | Mocked multi-feed cycle and isolated outage scenarios demonstrate idempotence and source-level errors. |
+| 6. Analyst audit and outbox | Persist review decisions, append-only audit, delivery outbox and disabled-by-default channel adapters. | Replay reconstructs decision chain; duplicate retries do not duplicate messages; no target asset mutation exists. |
+| 7. Compose and hardening | API/worker/PostgreSQL Compose, health checks, CI checks, deployment notes. | Clean setup works from `.env.example`; live secrets remain external; acceptance evidence is mapped to requirement ACs. |
+
+No implementation phase begins until Phase 0 is approved. The acceptance matrix and test cases are derived from the updated requirement’s FR/AC list; exact metric thresholds, timing targets, and source credentials must be confirmed before claiming compliance.
+
+## 12. Verification strategy
+
+- **Unit:** settings validation and redaction; API DTOs; migrations/models; feed parsing; identifier normalization; idempotency; queue leases; retries/backoff; LLM output schema and grounding; correlation outcomes; risk boundaries; review transitions.
+- **API contract:** OpenAPI snapshot/schema checks; status codes and safe error envelopes; pagination/filter bounds; no secret or internal path fields; auth role matrix.
+- **Integration:** PostgreSQL-backed run queue; API enqueues one run; worker executes FakeLLM fleet; dashboard/alert/review/run views match persisted records; scheduler enqueue behavior.
+- **Reliability/security:** source/LLM/database timeout and failure injection; one source outage isolation; repeat poll and repeated POST idempotence; untrusted bulletin injection; reviewer audit trail; no outbound target-system writes.
+- **Evaluation:** preserve existing offline gold evaluation. Add requirement metrics for precision/recall, uncertain matches routed to review, source citation coverage, and run latency. Live provider/channel checks are manually enabled and never leak credentials to CI artifacts.
+- **Manual acceptance:** clean Docker Compose startup, `.env.example` setup, browser dashboard, manual run progress, analyst queue, health/source status, and explicit disclosure of local fixture versus live feed/provider state.
+
+## 13. Decisions requiring confirmation before freeze
+
+The following cannot be safely inferred from the repository and are called out for approval:
+
+1. Is the deployment provider **Azure OpenAI**, and if so does the approved endpoint support the OpenAI-compatible route? If not, confirm the required Azure API version/deployment semantics for a dedicated adapter.
+2. Are FastAPI + PostgreSQL + a PostgreSQL-backed worker queue acceptable, or is an existing organization platform/database mandated?
+3. Confirm whether the requirement’s first source set is NVD + CISA KEV + OSV and whether EPSS is a required fourth enrichment source.
+4. Confirm local development identity behavior and the production identity provider/roles before shared deployment.
+5. Confirm which Teams/email mechanisms and recipients are approved; until then, outbox delivery remains disabled.
+6. Confirm inventory and advisory retention rules, raw bulletin storage, owner contact handling, and the model data boundary.
+7. Confirm whether analyst decisions should change alert state or only annotate/reclassify a review case. This proposal defaults to append-only disposition and no silent suppression.
+8. Confirm if the dashboard API is read-only to most users and which roles may enqueue runs or submit decisions.
+
+## 14. Freeze checklist
+
+The design can be marked **Approved / Frozen** when the requirement owner accepts the proposed stack and either answers or explicitly defers each item in Section 13. Record changes to this document and the decision log before implementation. After freeze, implementation can proceed phase by phase against the API and persistence contracts above; changes to a frozen contract require a decision-log entry.
