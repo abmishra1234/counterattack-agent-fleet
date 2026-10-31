@@ -5,7 +5,7 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Any, Literal, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 Priority = Literal["P1", "P2", "P3", "P4"]
 Criticality = Literal["critical", "high", "medium", "low"]
@@ -16,6 +16,9 @@ class Advisory(BaseModel):
 
     id: str
     source: Literal["nvd", "vendor_bulletin"]
+    source_url: str | None = None
+    source_retrieved_at: str | None = None
+    source_references: list[dict[str, Any]] = Field(default_factory=list)
     published: str
     title: str
     cvss: float | None = Field(default=None, ge=0, le=10)
@@ -41,13 +44,46 @@ class ExtractedAdvisory(BaseModel):
 
 
 class Asset(BaseModel):
-    asset_id: str
-    service: str
-    component: str
-    version: str
+    asset_id: str = Field(min_length=1, max_length=128)
+    service: str = Field(min_length=1, max_length=200)
+    component: str = Field(min_length=1, max_length=200)
+    version: str = Field(min_length=1, max_length=120)
     internet_facing: bool
     criticality: Criticality
-    owner: str
+    owner: str = Field(min_length=1, max_length=200)
+    vendor: str | None = Field(default=None, max_length=200)
+    product: str | None = Field(default=None, max_length=200)
+    asset_type: Literal["application", "service", "vendor_product", "saas"] = "application"
+    data_classification: Literal["public", "internal", "confidential", "restricted"] | None = None
+    aliases: list[str] = Field(default_factory=list, max_length=32)
+
+    @property
+    def inventory_product(self) -> str:
+        return self.product or self.component
+
+
+class InventoryDocument(BaseModel):
+    """Versioned inventory file contract; product-level data stays local to matching."""
+
+    schema_version: Literal["1.0"]
+    assets: list[Asset] = Field(min_length=1, max_length=10_000)
+
+    @model_validator(mode="after")
+    def validate_inventory_identity(self):
+        asset_ids = [asset.asset_id.casefold() for asset in self.assets]
+        if len(asset_ids) != len(set(asset_ids)):
+            raise ValueError("inventory asset_id values must be unique")
+        alias_targets: dict[str, str] = {}
+        for asset in self.assets:
+            canonical = asset.inventory_product.strip().casefold()
+            for alias in asset.aliases:
+                normalized = alias.strip().casefold()
+                if not normalized:
+                    raise ValueError("inventory aliases must not be empty")
+                previous = alias_targets.setdefault(normalized, canonical)
+                if previous != canonical:
+                    raise ValueError("inventory alias cannot map to multiple products")
+        return self
 
 
 class Match(BaseModel):

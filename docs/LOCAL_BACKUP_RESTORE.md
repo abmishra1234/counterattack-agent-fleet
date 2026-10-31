@@ -4,9 +4,13 @@ This procedure backs up the Compose PostgreSQL database and verifies a restore i
 
 ## What the backup contains
 
-The custom-format `pg_dump` contains the Counterstrike database, including run/job records, audit events and stream head, LLM usage metadata, and encrypted prompt/response artifacts. It does not contain the `output-data` volume or application secrets. LLM artifact decryption after restore requires the same `LLM_AUDIT_ENCRYPTION_KEY` and key version that were active when each artifact was encrypted. Keep keys in a separate approved secret store; never place them beside the dump.
+The custom-format `pg_dump` contains the Counterstrike database, including run/job records, audit events and stream head, LLM usage metadata, and encrypted prompt/response artifacts. It does not contain the `output-data` volume or application secrets. LLM artifact decryption after restore requires every key version referenced by retained artifacts. Configure those keys through `LLM_AUDIT_ENCRYPTION_KEYRING_JSON` in the trusted secret store; keep keys separate from the dump. The local provider accepts a versioned JSON keyring and retains `LLM_AUDIT_ENCRYPTION_KEY` as a single-active-key compatibility setting. If any artifact version is missing, the database can be restored but artifact decryption is partial; record that explicitly.
 
 `pg_dump` does not encrypt the backup file. Write the destination to encrypted storage with access restricted to authorized operators. The backup script also writes a SHA-256 checksum for transfer/integrity checks; a checksum does not provide confidentiality or prove who created the file.
+
+## Rotate the local artifact key
+
+The keyring maps immutable key-version strings to URL-safe base64-encoded 32-byte AES keys. Store the JSON as one secret value, for example `LLM_AUDIT_ENCRYPTION_KEYRING_JSON='{"local-v1":"<old-key>","local-v2":"<new-key>"}'`, and set `LLM_AUDIT_ENCRYPTION_KEY_VERSION=local-v2` for new artifacts. Keep every prior key in the ring while artifacts or backups encrypted with that version may still need to be read. Remove the legacy `LLM_AUDIT_ENCRYPTION_KEY` setting when switching to a different active version, or set it to the same key as the active ring entry. Removing an old key makes those artifact reads unavailable; a backup does not contain key material.
 
 ## Create a backup
 
@@ -45,7 +49,7 @@ docker compose -p counterstrike-restore-check cp $backup db:/tmp/restore.dump
 docker compose -p counterstrike-restore-check exec -T db pg_restore --username=counterstrike --dbname=counterstrike --no-owner --no-acl /tmp/restore.dump
 ```
 
-Before starting the API, configure the restore process with the original LLM artifact encryption key and key version in the trusted local `.env`; do not pass them as command-line arguments. Set `LOCAL_DEV_ROLE=admin` for local verification so the audit integrity and privileged artifact routes are available. Then start the API and check readiness and audit integrity:
+Before starting the API, configure the restore process with the original LLM artifact encryption key and key version in the trusted local `.env`; do not pass them as command-line arguments. Set `COUNTERSTRIKE_ENV=development` and `LOCAL_DEV_ROLE=admin` for this isolated local verification so the audit integrity and privileged artifact routes are available. Then start the API and check readiness and audit integrity:
 
 ```powershell
 docker compose -p counterstrike-restore-check up -d api

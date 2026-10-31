@@ -8,13 +8,15 @@ import ipaddress
 import json
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.openapi.utils import get_openapi
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import case, distinct, func, or_, select
@@ -25,6 +27,7 @@ from counterstrike.audit import append_event, verify_chain
 from counterstrike.config import PROJECT_ROOT, load_settings
 from counterstrike.db import get_session_factory
 from counterstrike.db_models import (
+    AdvisoryEnrichment,
     AdvisoryRecord,
     AlertRecord,
     AuditEvent,
@@ -40,6 +43,7 @@ from counterstrike.db_models import (
     Source,
     SourceCheckpoint,
 )
+from counterstrike.metrics import HTTPMetrics
 from counterstrike.observability import configure_logging, request_id_context
 from counterstrike.repositories import create_run
 
@@ -126,6 +130,42 @@ class LegacyPreviewResponse(BaseModel):
     last_run: str = Field(alias="lastRun")
 
 
+class RunSummary(BaseModel):
+    advisories_ingested: int
+    advisories_extracted: int
+    matches: int
+    alerts: int
+    needs_human: int
+
+
+class RunTraceItem(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    agent: str | None = None
+    ms: float | None = None
+    source_id: str | None = None
+    source_status: str | None = None
+    source_error_code: str | None = None
+    fetched_at: str | None = None
+    advisories: int | None = None
+    assets: int | None = None
+    matches: int | None = None
+    affected: int | None = None
+    not_affected: int | None = None
+    possible_match: int | None = None
+    needs_human: int | None = None
+    scored: int | None = None
+    by_priority: dict[str, int] | None = None
+    prompt_version: str | None = None
+    llm: str | None = None
+    llm_calls: int | None = None
+    extracted: int | None = None
+    suspected_injection: list[str] | None = None
+    alerts: int | None = None
+    summary_fallbacks: int | None = None
+    owners: int | None = None
+
+
 class RunListItem(BaseModel):
     id: str
     status: str
@@ -136,7 +176,7 @@ class RunListItem(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     safe_error_code: str | None
-    summary: dict[str, int]
+    summary: RunSummary
 
 
 class RunListResponse(BaseModel):
@@ -149,7 +189,7 @@ class RunListResponse(BaseModel):
 class RunDetailResponse(RunListItem):
     policy_version: str | None
     prompt_versions: dict[str, str]
-    trace: list[dict[str, Any]]
+    trace: list[RunTraceItem]
 
 
 class RunAcceptedResponse(BaseModel):
@@ -239,6 +279,33 @@ class ReviewDecisionItem(BaseModel):
     created_at: datetime
 
 
+class ReviewSourceEvidence(BaseModel):
+    source: str | None = None
+    external_id: str | None = None
+    published: str | None = None
+    cvss: float | None = None
+    text: str = ""
+    content_hash: str | None = None
+
+
+class SourceReference(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    url: str | None = None
+    name: str | None = None
+    source: str | None = None
+    advisory_id: str | None = None
+    type: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class MatchExplanation(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    version_note: str | None = None
+    confidence_scope: Literal["deterministic_version_comparison"] | None = None
+
+
 class MatchEvidenceItem(BaseModel):
     asset_id: str
     component: str
@@ -247,7 +314,7 @@ class MatchEvidenceItem(BaseModel):
     confidence: float | None
     affected_range: str | None
     comparator: str | None
-    explanation: dict[str, Any]
+    explanation: MatchExplanation
     evidence: list[str]
 
 
@@ -272,8 +339,8 @@ class ReviewListItem(BaseModel):
     title: str | None
     stage: str
     reason: str
-    source_evidence: dict[str, Any]
-    source_references: list[dict[str, Any]]
+    source_evidence: ReviewSourceEvidence
+    source_references: list[SourceReference]
     candidate_matches: list[MatchEvidenceItem]
     candidate_matches_truncated: bool
     state: str
@@ -310,6 +377,29 @@ class ReviewDecisionRequest(BaseModel):
         return cleaned
 
 
+def _is_http_source_url(value: Any) -> bool:
+    if not isinstance(value, str) or not 1 <= len(value) <= 2048:
+        return False
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return False
+    try:
+        ascii_host = host.encode("idna").decode("ascii") if host else ""
+    except UnicodeError:
+        return False
+    return bool(
+        parsed.scheme.lower() in {"http", "https"}
+        and ascii_host
+        and re.fullmatch(r"[A-Za-z0-9.:-]+", ascii_host)
+        and parsed.username is None
+        and parsed.password is None
+        and (port is None or 1 <= port <= 65535)
+    )
+
+
 class AlertListItem(BaseModel):
     id: str
     run_id: str
@@ -328,15 +418,53 @@ class AlertListItem(BaseModel):
     created_at: datetime
 
 
+class AlertEPSSContext(BaseModel):
+    status: Literal["available", "not_scored"]
+    score: float | None = None
+    percentile: float | None = None
+    score_date: str | None = None
+    source_url: str | None = None
+    observed_at: datetime | None = None
+
+
+class AlertAdvisoryContext(BaseModel):
+    title: str | None = None
+    source: str | None = None
+    published: str | None = None
+    cvss: float | None = None
+    text: str = ""
+    in_kev: bool = False
+    references: list[SourceReference] = Field(default_factory=list)
+    epss: AlertEPSSContext | None = None
+
+
+class AlertAssetContext(BaseModel):
+    asset_key: str | None = None
+    criticality: str | None = None
+    internet_facing: bool | None = None
+    data_classification: str | None = None
+    vendor: str | None = None
+
+
+class AlertScoreBreakdown(BaseModel):
+    cvss: float | None = None
+    kev: float | None = None
+    internet_facing: float | None = None
+    criticality: float | None = None
+    kev_internet_p1_override: float | None = None
+
+
 class AlertDetailResponse(AlertListItem):
     remediation: str
     sla_hours: int
-    score_breakdown: dict[str, Any]
+    score_breakdown: AlertScoreBreakdown
     policy_version: str
     evidence: list[str]
-    source_references: list[dict[str, Any]]
-    advisory: dict[str, Any]
-    asset_context: dict[str, Any]
+    source_references: list[SourceReference]
+    remediation_sources: list[SourceReference]
+    remediation_citation_status: Literal["cited", "unverified"]
+    advisory: AlertAdvisoryContext
+    asset_context: AlertAssetContext
     match: MatchEvidenceItem
     match_history: list[MatchHistoryItem]
     match_history_truncated: bool
@@ -362,6 +490,7 @@ class LLMCallItem(BaseModel):
     request_id: str | None
     job_id: str | None
     run_id: str | None
+    parent_call_id: str | None
     actor_id: str | None
     advisory_id: str | None
     task: str
@@ -403,9 +532,39 @@ class LLMUsageResponse(BaseModel):
     unknown_cost_calls: int
 
 
+LLMUsageGroupBy = Literal[
+    "day",
+    "run",
+    "task",
+    "provider",
+    "model",
+    "prompt_version",
+    "advisory",
+    "actor",
+    "outcome",
+]
+
+
+class LLMUsageReportGroup(BaseModel):
+    key: date | str | None
+    calls: int
+    retries: int
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    unknown_token_calls: int
+    currency: str
+    known_cost: str
+    estimated_unknown_cost_usd: str
+    budget_enforced_cost_usd: str
+    unknown_cost_calls: int
+    unknown_outcome_calls: int
+    pending_calls: int
+
+
 class LLMUsageReportResponse(BaseModel):
-    group_by: str
-    groups: list[dict[str, Any]]
+    group_by: LLMUsageGroupBy
+    groups: list[LLMUsageReportGroup]
     total_calls: int
     total_retries: int
     unknown_outcome_calls: int
@@ -416,11 +575,32 @@ class LLMUsageReportResponse(BaseModel):
     has_more: bool
 
 
+class LLMBudgetLimits(BaseModel):
+    per_run: str | None
+    per_month: str | None
+
+
+class LLMBudgetSummary(BaseModel):
+    calls: int
+    unknown_cost_calls: int
+    unpriced_calls: int
+    budget_enforced_usd: str
+    estimated_unknown_cost_usd: str
+    known_cost_by_currency: dict[str, str]
+    limit_status: Literal["not_configured", "unknown", "exceeded", "at_limit", "within_limit"]
+    remaining_usd: str | None
+
+
+class LLMRunBudgetSummary(LLMBudgetSummary):
+    run_id: str
+    limit_usd: str | None
+
+
 class LLMBudgetsResponse(BaseModel):
     period_start: datetime
-    configured_limits_usd: dict[str, str | None]
-    month_to_date: dict[str, Any]
-    run: dict[str, Any] | None
+    configured_limits_usd: LLMBudgetLimits
+    month_to_date: LLMBudgetSummary
+    run: LLMRunBudgetSummary | None
 
 
 class LLMArtifactMetadata(BaseModel):
@@ -529,42 +709,61 @@ def create_app(settings=None):
         debug=False,
     )
     app.state.settings = settings
+    http_metrics = HTTPMetrics()
+    app.state.http_metrics = http_metrics
     role_capabilities = {
         "viewer": {"read"},
         "analyst": {"read", "review"},
-        "operator": {"read", "review", "run", "usage"},
+        "operator": {"read", "review", "run", "usage", "metrics"},
         "audit_reader": {"read", "audit"},
         "llm_audit_reader": {"read", "usage", "llm_content"},
-        "admin": {"read", "review", "run", "usage", "llm_content", "audit"},
+        "admin": {"read", "review", "run", "usage", "llm_content", "audit", "metrics"},
     }
 
     def required_capability(path, method):
+        if path == "/metrics":
+            return "metrics" if settings.metrics_enabled else None
         if path in {
             "/health/live",
             "/api/v1/health/live",
             "/health/ready",
             "/api/v1/health/ready",
-            "/api/v1/auth/context",
-        }:
+        } and method == "GET":
             return None
-        if (
-            path == "/api/data"
-            or path.startswith(("/api/v1/dashboard", "/api/v1/sources", "/api/v1/alerts"))
-            or path == "/api/v1/runs"
-            and method == "GET"
-            or path.startswith("/api/v1/runs/")
-        ):
+        if path == "/api/v1/auth/context" and method == "GET":
             return "read"
+        if path == "/api/data":
+            return "read" if method == "GET" else "unmapped"
+        if path in {"/api/v1/dashboard", "/api/v1/sources", "/api/v1/alerts"} or re.fullmatch(
+            r"/api/v1/alerts/[^/]+", path
+        ):
+            return "read" if method == "GET" else "unmapped"
         if path == "/api/v1/runs" and method == "POST":
             return "run"
-        if path == "/api/v1/reviews" or path.startswith("/api/v1/reviews/"):
+        if path == "/api/v1/runs" or re.fullmatch(r"/api/v1/runs/[^/]+", path):
+            return "read" if method == "GET" else "unmapped"
+        if path == "/api/v1/reviews" and method == "GET":
             return "review"
-        if path.startswith("/api/v1/llm/usage/") and path.endswith("/content"):
+        if re.fullmatch(r"/api/v1/reviews/[^/]+/decision", path) and method == "POST":
+            return "review"
+        if re.fullmatch(r"/api/v1/llm/usage/[^/]+/content", path) and method == "POST":
             return "llm_content"
-        if path.startswith("/api/v1/audit/"):
-            return "audit"
-        if path.startswith("/api/v1/llm/"):
+        if method == "GET" and (
+            path
+            in {
+                "/api/v1/llm/budgets",
+                "/api/v1/llm/usage",
+                "/api/v1/llm/usage/report",
+            }
+            or re.fullmatch(r"/api/v1/llm/usage/[^/]+", path)
+        ):
             return "usage"
+        if path in {"/api/v1/audit/events", "/api/v1/audit/integrity"} and method == "GET":
+            return "audit"
+        # New versioned routes are closed until their capability is explicitly
+        # assigned above; never let an omitted route fall through as public.
+        if path.startswith("/api/v1/"):
+            return "unmapped"
         return None
 
     @app.middleware("http")
@@ -722,6 +921,7 @@ def create_app(settings=None):
             "request_id": record.request_id,
             "job_id": record.job_id,
             "run_id": record.run_id,
+            "parent_call_id": record.parent_call_id,
             "actor_id": record.actor_id,
             "advisory_id": record.advisory_id,
             "task": record.task,
@@ -1433,6 +1633,73 @@ def create_app(settings=None):
             .order_by(AdvisoryRecord.modified_at.desc(), AdvisoryRecord.id)
             .limit(1)
         )
+        epss_record = session.scalar(
+            select(AdvisoryEnrichment)
+            .join(AdvisoryRecord, AdvisoryRecord.id == AdvisoryEnrichment.advisory_id)
+            .where(
+                AdvisoryRecord.canonical_id == record.cve_id,
+                AdvisoryEnrichment.kind == "epss",
+            )
+            .order_by(AdvisoryEnrichment.observed_at.desc(), AdvisoryEnrichment.id.desc())
+            .limit(1)
+        )
+        references_record = session.scalar(
+            select(AdvisoryEnrichment)
+            .join(AdvisoryRecord, AdvisoryRecord.id == AdvisoryEnrichment.advisory_id)
+            .where(
+                AdvisoryRecord.canonical_id == record.cve_id,
+                AdvisoryEnrichment.kind == "references",
+            )
+            .order_by(AdvisoryEnrichment.observed_at.desc(), AdvisoryEnrichment.id.desc())
+            .limit(1)
+        )
+        references_payload = (
+            references_record.value
+            if references_record and isinstance(references_record.value, dict)
+            else {}
+        )
+        source_references = references_payload.get("references")
+        if not isinstance(source_references, list):
+            source_references = advisory_record.source_references if advisory_record else []
+        source_references = [
+            reference
+            for reference in source_references
+            if isinstance(reference, dict) and _is_http_source_url(reference.get("url"))
+        ]
+        remediation_tags = (
+            {"patch", "vendor advisory", "release notes"}
+            if record.fixed_version
+            else {"mitigation", "vendor advisory"}
+        )
+        remediation_sources = [
+            reference
+            for reference in source_references
+            if remediation_tags
+            & {
+                tag.strip().casefold()
+                for tag in reference.get("tags", [])
+                if isinstance(tag, str)
+            }
+        ]
+        citation_status = "cited" if remediation_sources else "unverified"
+        epss_payload = (
+            epss_record.value
+            if epss_record and isinstance(epss_record.value, dict)
+            else {}
+        )
+        epss_status = epss_payload.get("status")
+        epss_context = (
+            {
+                "status": epss_status,
+                "score": epss_payload.get("score"),
+                "percentile": epss_payload.get("percentile"),
+                "score_date": epss_payload.get("score_date"),
+                "source_url": epss_record.source_url,
+                "observed_at": epss_record.observed_at,
+            }
+            if epss_status in {"available", "not_scored"}
+            else None
+        )
         advisory_payload = advisory_record.normalized_payload or {} if advisory_record else {}
         advisory_context = (
             {
@@ -1442,7 +1709,8 @@ def create_app(settings=None):
                 "cvss": float(advisory_record.cvss) if advisory_record.cvss is not None else None,
                 "text": str(advisory_payload.get("text") or "")[:20000],
                 "in_kev": bool(advisory_payload.get("in_kev")),
-                "references": advisory_record.source_references or [],
+                "references": source_references,
+                "epss": epss_context,
             }
             if advisory_record
             else {}
@@ -1503,7 +1771,9 @@ def create_app(settings=None):
             "score_breakdown": record.score_breakdown or {},
             "policy_version": record.policy_version,
             "evidence": record.evidence or [],
-            "source_references": record.source_references or [],
+            "source_references": source_references,
+            "remediation_sources": remediation_sources,
+            "remediation_citation_status": citation_status,
             "advisory": advisory_context,
             "asset_context": asset_context,
             "match": match_evidence_item(match_record, asset),
@@ -1607,17 +1877,7 @@ def create_app(settings=None):
 
     @app.get("/api/v1/llm/usage/report", response_model=LLMUsageReportResponse, tags=["llm-usage"])
     def llm_usage_report(
-        group_by: Literal[
-            "day",
-            "run",
-            "task",
-            "provider",
-            "model",
-            "prompt_version",
-            "advisory",
-            "actor",
-            "outcome",
-        ] = Query(default="day"),
+        group_by: LLMUsageGroupBy = Query(default="day"),
         since: datetime | None = Query(default=None),
         until: datetime | None = Query(default=None),
         run_id: str | None = Query(default=None, max_length=36),
@@ -1997,34 +2257,60 @@ def create_app(settings=None):
                         )
                         session.commit()
                 except Exception as exc:
-                    app_logger.error(
-                        "Protected API request stopped because its start event could not be "
-                        "persisted",
-                        extra={
-                            "event": "api.request.audit_unavailable",
-                            "error_code": type(exc).__name__,
-                            "method": request.method,
-                            "route": request.url.path,
-                            "request_id": request_id,
-                        },
-                    )
-                    unavailable = JSONResponse(
-                        status_code=503,
-                        content={
-                            "error": {
-                                "code": "audit_unavailable",
-                                "message": (
-                                    "The request could not be processed because audit storage "
-                                    "is unavailable."
-                                ),
+                    if request.url.path == "/metrics":
+                        app_logger.warning(
+                            "Metrics scrape is continuing without a persisted start event",
+                            extra={
+                                "event": "api.metrics.audit_unavailable",
+                                "error_code": type(exc).__name__,
+                                "method": request.method,
+                                "route": "/metrics",
                                 "request_id": request_id,
-                            }
-                        },
-                    )
-                    unavailable.headers["X-Request-ID"] = request_id
-                    return unavailable
+                            },
+                        )
+                    else:
+                        app_logger.error(
+                            "Protected API request stopped because its start event could not be "
+                            "persisted",
+                            extra={
+                                "event": "api.request.audit_unavailable",
+                                "error_code": type(exc).__name__,
+                                "method": request.method,
+                                "route": request.url.path,
+                                "request_id": request_id,
+                            },
+                        )
+                        unavailable = JSONResponse(
+                            status_code=503,
+                            content={
+                                "error": {
+                                    "code": "audit_unavailable",
+                                    "message": (
+                                        "The request could not be processed because audit "
+                                        "storage is unavailable."
+                                    ),
+                                    "request_id": request_id,
+                                }
+                            },
+                        )
+                        unavailable.headers["X-Request-ID"] = request_id
+                        http_metrics.observe(
+                            request.method,
+                            "audit_unavailable",
+                            unavailable.status_code,
+                            (datetime.now(timezone.utc) - started).total_seconds(),
+                        )
+                        return unavailable
             response = await call_next(request)
         except Exception as exc:
+            route = request.scope.get("route")
+            route_template = getattr(route, "path", "unmatched")
+            http_metrics.observe(
+                request.method,
+                route_template,
+                500,
+                (datetime.now(timezone.utc) - started).total_seconds(),
+            )
             app_logger.error(
                 "Request failed before a response was produced",
                 extra={
@@ -2066,6 +2352,12 @@ def create_app(settings=None):
             duration_ms = round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 2)
             route = request.scope.get("route")
             route_template = getattr(route, "path", "unmatched")
+            http_metrics.observe(
+                request.method,
+                route_template,
+                response.status_code,
+                (datetime.now(timezone.utc) - started).total_seconds(),
+            )
             app_logger.info(
                 "HTTP request completed",
                 extra={
@@ -2173,6 +2465,109 @@ def create_app(settings=None):
             },
         )
 
+    @app.get("/metrics", include_in_schema=False)
+    def metrics_endpoint():
+        if not settings.metrics_enabled:
+            raise HTTPException(status_code=404, detail="Not found")
+        lines = [http_metrics.render().rstrip()]
+        database_up = 0
+        if settings.database_url is not None:
+            try:
+                factory = get_session_factory(settings)
+                with factory() as session:
+                    job_rows = session.execute(
+                        select(JobRecord.status, func.count(JobRecord.id)).group_by(
+                            JobRecord.status
+                        )
+                    ).all()
+                    llm_rows = session.execute(
+                        select(
+                            LLMCall.outcome,
+                            func.count(LLMCall.id),
+                            func.coalesce(func.sum(LLMCall.input_tokens), 0),
+                            func.coalesce(func.sum(LLMCall.output_tokens), 0),
+                            func.coalesce(
+                                func.sum(
+                                    case(
+                                        (LLMCall.cost_currency == "USD", LLMCall.cost_amount),
+                                        else_=None,
+                                    )
+                                ),
+                                0,
+                            ),
+                        ).group_by(LLMCall.outcome)
+                    ).all()
+                database_up = 1
+                lines.extend(
+                    [
+                        "# HELP counterstrike_jobs Current jobs by status.",
+                        "# TYPE counterstrike_jobs gauge",
+                    ]
+                )
+                allowed_job_statuses = {
+                    "queued",
+                    "running",
+                    "retry_wait",
+                    "succeeded",
+                    "failed",
+                    "cancelled",
+                }
+                for status, count in job_rows:
+                    bounded_status = status if status in allowed_job_statuses else "other"
+                    lines.append(
+                        f'counterstrike_jobs{{status="{bounded_status}"}} {int(count)}'
+                    )
+                lines.extend(
+                    [
+                        "# HELP counterstrike_llm_calls Recorded LLM calls by outcome.",
+                        "# TYPE counterstrike_llm_calls gauge",
+                        "# HELP counterstrike_llm_tokens Persisted LLM tokens by direction.",
+                        "# TYPE counterstrike_llm_tokens gauge",
+                        "# HELP counterstrike_llm_cost_known_usd Known USD cost of LLM calls.",
+                        "# TYPE counterstrike_llm_cost_known_usd gauge",
+                    ]
+                )
+                allowed_outcomes = {
+                    "pending",
+                    "succeeded",
+                    "failed",
+                    "unknown",
+                }
+                for outcome, count, input_tokens, output_tokens, cost_usd in llm_rows:
+                    bounded_outcome = outcome if outcome in allowed_outcomes else "other"
+                    lines.append(
+                        f'counterstrike_llm_calls{{outcome="{bounded_outcome}"}} {int(count)}'
+                    )
+                    lines.append(
+                        f'counterstrike_llm_tokens{{direction="input",'
+                        f'outcome="{bounded_outcome}"}} {int(input_tokens)}'
+                    )
+                    lines.append(
+                        f'counterstrike_llm_tokens{{direction="output",'
+                        f'outcome="{bounded_outcome}"}} {int(output_tokens)}'
+                    )
+                    lines.append(
+                        f'counterstrike_llm_cost_known_usd{{outcome="{bounded_outcome}"}} '
+                        f"{Decimal(cost_usd):.10f}"
+                    )
+            except Exception as exc:
+                app_logger.error(
+                    "Metrics database snapshot could not be collected",
+                    extra={
+                        "event": "api.metrics.database_unavailable",
+                        "error_code": type(exc).__name__,
+                    },
+                )
+        lines.append(
+            "# HELP counterstrike_database_up Whether the metrics database query succeeded."
+        )
+        lines.append("# TYPE counterstrike_database_up gauge")
+        lines.append(f"counterstrike_database_up {database_up}")
+        return Response(
+            content="\n".join(lines) + "\n",
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
     @app.get("/health/live", response_model=HealthResponse, tags=["health"])
     @app.get("/api/v1/health/live", response_model=HealthResponse, tags=["health"])
     async def liveness():
@@ -2238,6 +2633,81 @@ def create_app(settings=None):
             "Frontend directory is missing; API will run without static UI",
             extra={"event": "api.frontend.unavailable", "error_code": "frontend_missing"},
         )
+
+    def custom_openapi():
+        if app.openapi_schema is not None:
+            return app.openapi_schema
+        schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+        )
+        error_response = {
+            "description": "The request could not be completed.",
+            "content": {
+                "application/json": {
+                    "schema": {"$ref": "#/components/schemas/ErrorResponse"}
+                }
+            },
+        }
+        for path, operations in schema.get("paths", {}).items():
+            for method, operation in operations.items():
+                if method not in {"get", "post", "put", "patch", "delete", "options"}:
+                    continue
+                responses = operation.setdefault("responses", {})
+                if "422" in responses:
+                    responses["422"] = {
+                        **error_response,
+                        "description": "Request validation failed.",
+                    }
+                responses.setdefault(
+                    "500",
+                    {**error_response, "description": "An unexpected error occurred."},
+                )
+                if "{" in path:
+                    responses.setdefault(
+                        "404",
+                        {**error_response, "description": "The requested resource was not found."},
+                    )
+                if method == "post" and path in {
+                    "/api/v1/runs",
+                    "/api/v1/reviews/{review_id}/decision",
+                }:
+                    responses.setdefault(
+                        "409",
+                        {
+                            **error_response,
+                            "description": "The requested state transition conflicted.",
+                        },
+                    )
+                if method == "post" and path.endswith("/content"):
+                    responses.setdefault(
+                        "410",
+                        {
+                            **error_response,
+                            "description": "The captured artifact expired or was purged.",
+                        },
+                    )
+                if required_capability(path, method.upper()) is not None:
+                    responses.setdefault(
+                        "403",
+                        {
+                            **error_response,
+                            "description": "The configured identity is not authorized.",
+                        },
+                    )
+                    responses.setdefault(
+                        "503",
+                        {
+                            **error_response,
+                            "description": "Audit storage or a required service is unavailable.",
+                        },
+                    )
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = custom_openapi
     return app
 
 

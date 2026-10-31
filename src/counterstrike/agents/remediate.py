@@ -7,6 +7,7 @@ summary, and that summary is rejected if it mentions any version not in the fact
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from counterstrike.guards import summary_is_grounded
@@ -14,17 +15,74 @@ from counterstrike.llm import LLMPort
 from counterstrike.models import Alert, FleetState
 from counterstrike.versions import spec_versions, versions_in
 
-PROMPT_VERSION = "summarise_v1"
+PROMPT_VERSION = "impact_summary_v1"
 logger = logging.getLogger("counterstrike.agent.remediate")
-SYSTEM = """Write a 1-2 sentence alert summary for an engineering owner.
-Use only the facts given. Do not invent versions, exploits or priorities. No markdown."""
+SYSTEM = """Write exactly three concise sentences for an engineering owner, labeled Security impact,
+Operational impact, and Business impact. Use only the supplied facts. For security, describe CVSS
+and KEV status. For operations, describe the affected component/version and service. For business,
+describe the supplied criticality and internet exposure. Do not infer a breach, outage, exploit
+activity, financial loss, or other facts. Do not change priority, SLA, ownership, match outcome, or
+recommend a remediation. No markdown beyond the three labels."""
 
 
 def _template(
-    cve: str, title: str, component: str, installed: str, service: str, fixed: str | None
+    *,
+    cve: str,
+    title: str,
+    component: str,
+    installed: str,
+    service: str,
+    cvss: float,
+    in_kev: bool,
+    internet_facing: bool,
+    criticality: str,
 ) -> str:
-    fix = f"Upgrade to {fixed}." if fixed else "No fixed version published yet."
-    return f"{component} {installed} on {service} is affected by {cve} ({title}). {fix}"
+    kev_text = "is listed in CISA KEV" if in_kev else "is not listed in CISA KEV"
+    exposure_text = "internet-facing" if internet_facing else "not internet-facing"
+    return (
+        f"Security impact: {cve} ({title}) has CVSS {cvss:.1f} and {kev_text}. "
+        f"Operational impact: {service} runs affected {component} {installed}. "
+        f"Business impact: {service} is classified as {criticality} criticality and is {exposure_text}."
+    )
+
+
+def _impact_summary_is_grounded(
+    summary: str,
+    *,
+    cvss: float,
+    in_kev: bool,
+    internet_facing: bool,
+    criticality: str,
+    component: str,
+    installed: str,
+    service: str,
+) -> bool:
+    lowered = summary.lower()
+    required_labels = ("security impact:", "operational impact:", "business impact:")
+    required_facts = (f"{cvss:.1f}", criticality.lower(), component.lower(), installed.lower(), service.lower())
+    if not all(label in lowered for label in required_labels) or not all(
+        fact in lowered for fact in required_facts
+    ):
+        return False
+    if "kev" not in lowered or (in_kev == ("not listed" in lowered)):
+        return False
+    if internet_facing and not re.search(r"\binternet[- ]facing\b", lowered):
+        return False
+    if not internet_facing and not re.search(
+        r"\bnot\s+internet[- ]facing\b|\binternally isolated\b", lowered
+    ):
+        return False
+    if not in_kev and re.search(
+        r"\b(?:actively exploited|exploited in the wild|known exploited|exploitation observed)\b",
+        lowered,
+    ):
+        return False
+    if not internet_facing and re.search(
+        r"\b(?:is|remains|currently)\s+(?:publicly\s+)?(?:internet-facing|exposed|accessible)\b",
+        lowered,
+    ):
+        return False
+    return True
 
 
 def remediate_agent(state: FleetState, llm: LLMPort) -> dict:
@@ -40,9 +98,14 @@ def remediate_agent(state: FleetState, llm: LLMPort) -> dict:
             "title": adv.title,
             "component": s.component,
             "installed_version": s.installed_version,
+            "affected_range": s.affected,
             "fixed_version": s.fixed_version,
             "service": asset.service,
             "priority": s.priority,
+            "cvss": f"{adv.cvss:.1f}",
+            "kev_listed": adv.in_kev,
+            "internet_facing": asset.internet_facing,
+            "business_criticality": asset.criticality,
         }
         user = "\n".join(f"{k}: {v}" for k, v in facts.items())
         try:
@@ -73,22 +136,42 @@ def remediate_agent(state: FleetState, llm: LLMPort) -> dict:
             {s.installed_version, s.fixed_version or ""}
             | spec_versions(s.affected)
             | versions_in(adv.title)
+            | {f"{adv.cvss:.1f}"}
         )
-        if not summary or not summary_is_grounded(summary, allowed):
+        if (
+            not summary
+            or not summary_is_grounded(summary, allowed)
+            or not _impact_summary_is_grounded(
+                summary,
+                cvss=adv.cvss,
+                in_kev=adv.in_kev,
+                internet_facing=asset.internet_facing,
+                criticality=asset.criticality,
+                component=s.component,
+                installed=s.installed_version,
+                service=asset.service,
+            )
+        ):
             fallbacks += 1
             summary = _template(
-                s.advisory_id,
-                adv.title,
-                s.component,
-                s.installed_version,
-                asset.service,
-                s.fixed_version,
+                cve=s.advisory_id,
+                title=adv.title,
+                component=s.component,
+                installed=s.installed_version,
+                service=asset.service,
+                cvss=adv.cvss,
+                in_kev=adv.in_kev,
+                internet_facing=asset.internet_facing,
+                criticality=asset.criticality,
             )
         remediation = (
             f"Upgrade {s.component} from {s.installed_version} to {s.fixed_version} or later, "
             f"rebuild and redeploy {asset.service}, then re-run the dependency scan to confirm."
             if s.fixed_version
-            else f"No fix yet: apply vendor workarounds and limit exposure of {asset.service}."
+            else (
+                f"No fixed version is recorded in the advisory data for {s.component}. "
+                f"Review vendor guidance and use only analyst-approved mitigations for {asset.service}."
+            )
         )
         evidence = [
             *adv.evidence,

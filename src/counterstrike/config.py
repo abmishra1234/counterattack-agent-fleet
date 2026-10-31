@@ -6,6 +6,7 @@ values so deployment secret stores remain authoritative.
 
 from __future__ import annotations
 
+import base64
 import ipaddress
 import json
 import os
@@ -79,6 +80,16 @@ def _as_bool(value: str | bool, name: str) -> bool:
     raise ValueError(f"{name} must be true or false")
 
 
+def _decode_llm_audit_key(encoded_key: str, setting_name: str) -> bytes:
+    try:
+        decoded = base64.b64decode(encoded_key.encode("ascii"), altchars=b"-_", validate=True)
+    except (ValueError, UnicodeEncodeError) as exc:
+        raise ValueError(f"{setting_name} must contain URL-safe base64 keys") from exc
+    if len(decoded) != 32:
+        raise ValueError(f"{setting_name} keys must decode to 32 bytes")
+    return decoded
+
+
 class Settings(BaseModel):
     """Validated settings used by the API and worker processes."""
 
@@ -88,6 +99,7 @@ class Settings(BaseModel):
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65535)
     api_trusted_local_client_cidrs: str = Field(default="", max_length=512)
+    metrics_enabled: bool = True
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     local_dev_identity: str = Field(default="local-development", min_length=1, max_length=200)
     local_dev_role: Literal[
@@ -106,6 +118,8 @@ class Settings(BaseModel):
 
     public_feeds_enabled: bool = False
     public_feeds_approved: bool = False
+    epss_enabled: bool = False
+    epss_approved: bool = False
     public_feed_scheduler_enabled: bool = False
     public_feed_poll_interval_minutes: int = Field(default=15, ge=1, le=1440)
     nvd_api_key: SecretStr | None = None
@@ -121,11 +135,13 @@ class Settings(BaseModel):
     llm_timeout_seconds: float = Field(default=30, gt=0, le=300)
     llm_max_retries: int = Field(default=2, ge=0, le=5)
     llm_max_output_tokens: int = Field(default=1200, ge=1, le=100_000)
+    llm_max_response_bytes: int = Field(default=2_097_152, ge=1024, le=67_108_864)
     llm_extraction_enabled: bool = True
     llm_summary_enabled: bool = True
     llm_audit_content_capture: bool = False
     llm_audit_encryption_key: SecretStr | None = None
-    llm_audit_encryption_key_version: str = "local-v1"
+    llm_audit_encryption_keyring_json: SecretStr | None = Field(default=None, max_length=16_384)
+    llm_audit_encryption_key_version: str = Field(default="local-v1", min_length=1, max_length=100)
     llm_audit_artifact_retention_days: int | None = Field(default=None, ge=1, le=3650)
     llm_input_price_usd_per_1m: Decimal | None = Field(default=None, ge=0)
     llm_output_price_usd_per_1m: Decimal | None = Field(default=None, ge=0)
@@ -224,8 +240,73 @@ class Settings(BaseModel):
             raise ValueError("OUTBOX_RECIPIENT_MAP_JSON must map owners to bounded recipient refs")
         return value
 
+    @field_validator("llm_audit_encryption_keyring_json")
+    @classmethod
+    def validate_llm_audit_keyring(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        try:
+            mapping = json.loads(value.get_secret_value())
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("LLM_AUDIT_ENCRYPTION_KEYRING_JSON must be a JSON object") from exc
+        if (
+            not isinstance(mapping, dict)
+            or not mapping
+            or len(mapping) > 32
+            or any(
+                not isinstance(version, str)
+                or not version.strip()
+                or len(version) > 100
+                or not isinstance(encoded_key, str)
+                for version, encoded_key in mapping.items()
+            )
+        ):
+            raise ValueError(
+                "LLM_AUDIT_ENCRYPTION_KEYRING_JSON must map at most 32 key versions to keys"
+            )
+        for encoded_key in mapping.values():
+            _decode_llm_audit_key(encoded_key, "LLM_AUDIT_ENCRYPTION_KEYRING_JSON")
+        return value
+
+    @field_validator("llm_audit_encryption_key")
+    @classmethod
+    def validate_llm_audit_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None:
+            _decode_llm_audit_key(value.get_secret_value(), "LLM_AUDIT_ENCRYPTION_KEY")
+        return value
+
+    @field_validator("llm_audit_encryption_key_version")
+    @classmethod
+    def validate_llm_audit_key_version(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned or len(cleaned) > 100:
+            raise ValueError("LLM_AUDIT_ENCRYPTION_KEY_VERSION must be 1-100 characters")
+        return cleaned
+
     @model_validator(mode="after")
     def validate_runtime_policy(self) -> Settings:
+        keyring = self.llm_audit_encryption_keys
+        active_key = keyring.get(self.llm_audit_encryption_key_version)
+        legacy_key = (
+            self.llm_audit_encryption_key.get_secret_value()
+            if self.llm_audit_encryption_key
+            else None
+        )
+        if (
+            active_key
+            and legacy_key
+            and _decode_llm_audit_key(
+                active_key, "LLM_AUDIT_ENCRYPTION_KEYRING_JSON"
+            )
+            != _decode_llm_audit_key(legacy_key, "LLM_AUDIT_ENCRYPTION_KEY")
+        ):
+            raise ValueError(
+                "LLM_AUDIT_ENCRYPTION_KEY conflicts with the active keyring version"
+            )
+        if self.llm_audit_content_capture and not (active_key or legacy_key):
+            raise ValueError(
+                "LLM audit content capture requires a key for the active key version"
+            )
         if self.outbox_enqueue_enabled and (
             self.outbox_channel is None or self.outbox_recipient_map_json is None
         ):
@@ -235,6 +316,12 @@ class Settings(BaseModel):
                 raise ValueError("Live public feeds require PUBLIC_FEEDS_APPROVED=true")
             if self.database_url is None:
                 raise ValueError("Live public feeds require DATABASE_URL for checkpoints")
+        if self.epss_enabled and not (
+            self.public_feeds_enabled and self.public_feeds_approved and self.epss_approved
+        ):
+            raise ValueError(
+                "EPSS enrichment requires enabled, approved public feeds and EPSS_APPROVED=true"
+            )
         if self.public_feed_scheduler_enabled and not (
             self.public_feeds_enabled and self.public_feeds_approved and self.database_url
         ):
@@ -266,11 +353,10 @@ class Settings(BaseModel):
                 raise ValueError("Live LLM calls require HTTPS outside development")
             if not self.llm_audit_content_capture:
                 raise ValueError("Live LLM calls require LLM_AUDIT_CONTENT_CAPTURE=true")
-            if (
-                not self.llm_audit_encryption_key
-                or not self.llm_audit_encryption_key.get_secret_value().strip()
-            ):
-                raise ValueError("Live LLM calls require LLM_AUDIT_ENCRYPTION_KEY")
+            if not (active_key or legacy_key):
+                raise ValueError(
+                    "Live LLM calls require a key for LLM_AUDIT_ENCRYPTION_KEY_VERSION"
+                )
             if self.llm_audit_artifact_retention_days is None:
                 raise ValueError("Live LLM calls require an approved LLM artifact retention period")
             if self.database_url is None:
@@ -311,6 +397,12 @@ class Settings(BaseModel):
             return {}
         return json.loads(self.outbox_recipient_map_json.get_secret_value())
 
+    @property
+    def llm_audit_encryption_keys(self) -> dict[str, str]:
+        if self.llm_audit_encryption_keyring_json is None:
+            return {}
+        return json.loads(self.llm_audit_encryption_keyring_json.get_secret_value())
+
 
 def load_settings(dotenv_path: Path = DOTENV_PATH) -> Settings:
     """Load settings with OS environment taking precedence over local .env values."""
@@ -336,6 +428,7 @@ def load_settings(dotenv_path: Path = DOTENV_PATH) -> Settings:
             api_host=values.get("API_HOST", "127.0.0.1"),
             api_port=values.get("API_PORT", "8000"),
             api_trusted_local_client_cidrs=values.get("API_TRUSTED_LOCAL_CLIENT_CIDRS", ""),
+            metrics_enabled=_as_bool(values.get("METRICS_ENABLED", "true"), "METRICS_ENABLED"),
             log_level=values.get("LOG_LEVEL", "INFO").strip().upper(),
             local_dev_identity=values.get("LOCAL_DEV_IDENTITY", "local-development"),
             local_dev_role=values.get("LOCAL_DEV_ROLE", "operator").strip().lower(),
@@ -354,6 +447,8 @@ def load_settings(dotenv_path: Path = DOTENV_PATH) -> Settings:
             public_feeds_approved=_as_bool(
                 values.get("PUBLIC_FEEDS_APPROVED", "false"), "PUBLIC_FEEDS_APPROVED"
             ),
+            epss_enabled=_as_bool(values.get("EPSS_ENABLED", "false"), "EPSS_ENABLED"),
+            epss_approved=_as_bool(values.get("EPSS_APPROVED", "false"), "EPSS_APPROVED"),
             public_feed_scheduler_enabled=_as_bool(
                 values.get("PUBLIC_FEED_SCHEDULER_ENABLED", "false"),
                 "PUBLIC_FEED_SCHEDULER_ENABLED",
@@ -380,6 +475,7 @@ def load_settings(dotenv_path: Path = DOTENV_PATH) -> Settings:
             llm_timeout_seconds=values.get("LLM_TIMEOUT_SECONDS", "30"),
             llm_max_retries=values.get("LLM_MAX_RETRIES", "2"),
             llm_max_output_tokens=values.get("LLM_MAX_OUTPUT_TOKENS", "1200"),
+            llm_max_response_bytes=values.get("LLM_MAX_RESPONSE_BYTES", "2097152"),
             llm_extraction_enabled=_as_bool(
                 values.get("LLM_EXTRACTION_ENABLED", "true"), "LLM_EXTRACTION_ENABLED"
             ),
@@ -390,6 +486,7 @@ def load_settings(dotenv_path: Path = DOTENV_PATH) -> Settings:
                 values.get("LLM_AUDIT_CONTENT_CAPTURE", "false"), "LLM_AUDIT_CONTENT_CAPTURE"
             ),
             llm_audit_encryption_key=optional("LLM_AUDIT_ENCRYPTION_KEY"),
+            llm_audit_encryption_keyring_json=optional("LLM_AUDIT_ENCRYPTION_KEYRING_JSON"),
             llm_audit_encryption_key_version=values.get(
                 "LLM_AUDIT_ENCRYPTION_KEY_VERSION", "local-v1"
             ),

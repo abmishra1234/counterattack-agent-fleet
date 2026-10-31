@@ -45,6 +45,14 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    purged_count = op.get_bind().scalar(
+        sa.text("SELECT count(*) FROM llm_exchange_artifacts WHERE purged_at IS NOT NULL")
+    )
+    if purged_count:
+        raise RuntimeError(
+            "Cannot downgrade artifact purge after ciphertext has been purged; "
+            "restore a verified pre-purge backup or roll forward"
+        )
     op.execute("DROP TRIGGER trg_llm_artifacts_no_delete ON llm_exchange_artifacts")
     op.execute("DROP TRIGGER trg_llm_artifacts_purge_only ON llm_exchange_artifacts")
     op.execute("DROP FUNCTION counterstrike_allow_llm_artifact_purge()")

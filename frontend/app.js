@@ -14,6 +14,14 @@ let usageLoadSequence = 0;
 const escapeHtml = (value = '') => String(value).replace(/[&<>"']/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
 }[char]));
+const checkedHttpUrl = (value) => {
+  try {
+    const url = new URL(value);
+    return ['https:', 'http:'].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+};
 const niceDate = (value) => value ? new Date(value).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'Not recorded';
 const friendlyName = (value = '') => value.split(/[-_]/).map((part) => part ? part[0].toUpperCase() + part.slice(1) : '').join(' ');
 const priorityClass = (priority = 'P4') => `priority-${priority}`;
@@ -474,7 +482,7 @@ async function openLLMCall(callId) {
     const contentCapability = model.capabilities.includes('llm_content');
     const artifacts = (item.artifacts || []).map((artifact) => `<button class="button small" type="button" data-artifact-kind="${escapeHtml(artifact.kind)}">View ${escapeHtml(friendlyName(artifact.kind))}</button>`).join('');
     drawerRoot.innerHTML = `<div class="drawer-backdrop" data-close-drawer></div><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="llm-drawer-title"><div class="drawer-head"><div class="drawer-kicker"><span>MODEL CALL · ${escapeHtml(item.id)}</span><button class="icon-button" type="button" aria-label="Close call details" data-close-drawer>&times;</button></div><h2 class="drawer-title" id="llm-drawer-title">${escapeHtml(friendlyName(item.task))}</h2><div class="drawer-subtitle">${escapeHtml(item.provider)} · ${escapeHtml(item.model)} · ${escapeHtml(friendlyName(item.outcome))}</div></div><div class="drawer-body">
-      <section class="drawer-block"><h3>Correlation</h3><div class="usage-detail-grid"><span>Run<strong>${escapeHtml(item.run_id || '—')}</strong></span><span>Request<strong>${escapeHtml(item.request_id || '—')}</strong></span><span>Job<strong>${escapeHtml(item.job_id || '—')}</strong></span><span>Actor<strong>${escapeHtml(item.actor_id || '—')}</strong></span><span>Advisory<strong>${escapeHtml(item.advisory_id || '—')}</strong></span><span>Prompt version<strong>${escapeHtml(item.prompt_version)}</strong></span><span>Prompt hash<strong>${escapeHtml(item.prompt_hash)}</strong></span><span>Attempt<strong>${item.attempt_number}</strong></span></div></section>
+      <section class="drawer-block"><h3>Correlation</h3><div class="usage-detail-grid"><span>Run<strong>${escapeHtml(item.run_id || '—')}</strong></span><span>Request<strong>${escapeHtml(item.request_id || '—')}</strong></span><span>Job<strong>${escapeHtml(item.job_id || '—')}</strong></span><span>Parent call<strong>${escapeHtml(item.parent_call_id || '—')}</strong></span><span>Actor<strong>${escapeHtml(item.actor_id || '—')}</strong></span><span>Advisory<strong>${escapeHtml(item.advisory_id || '—')}</strong></span><span>Prompt version<strong>${escapeHtml(item.prompt_version)}</strong></span><span>Prompt hash<strong>${escapeHtml(item.prompt_hash)}</strong></span><span>Attempt<strong>${item.attempt_number}</strong></span></div></section>
       <section class="drawer-block"><h3>Usage and cost</h3><div class="review-callout">Input ${item.input_tokens ?? 'unknown'} tokens · output ${item.output_tokens ?? 'unknown'} · total ${item.total_tokens ?? 'unknown'}<br>Cost ${item.cost_amount == null ? 'unknown' : `${escapeHtml(item.cost_currency || 'USD')} ${escapeHtml(item.cost_amount)}`} · reserved USD ${item.budget_estimate_usd == null ? '—' : escapeHtml(item.budget_estimate_usd)}<br>Outcome ${escapeHtml(item.outcome)} · ${item.latency_ms ?? 'latency unavailable'} ms${item.safe_error_code ? `<br>Recorded error: ${escapeHtml(item.safe_error_code)}` : ''}</div></section>
       <section class="drawer-block"><h3>Captured artifacts</h3>${contentCapability ? `<p class="page-description">Each read requires a purpose and is recorded in the audit log.</p><label class="field-label" for="artifact-purpose">Access purpose</label><input id="artifact-purpose" class="usage-input" minlength="8" maxlength="500" placeholder="Explain why you need to inspect this content"><div class="artifact-buttons">${artifacts || '<span class="page-description">No retained artifacts are available.</span>'}</div><pre class="artifact-content" id="artifact-content" hidden></pre>` : '<p class="page-description">Artifact content requires the LLM audit reader capability. Metadata remains visible to usage readers.</p>'}</section>
       </div></aside>`;
@@ -534,20 +542,59 @@ async function openAlert(alertId) {
       : '';
     const criticality = asset.criticality ? friendlyName(asset.criticality) : 'Not available';
     const isKev = Boolean(advisory.in_kev);
+    const epss = advisory.epss || null;
+    const epssUrl = checkedHttpUrl(epss?.source_url);
+    const epssHtml = !epss
+      ? '<p class="page-description">EPSS enrichment is not available for this advisory.</p>'
+      : epss.status === 'available'
+        ? `<p class="page-description">EPSS likelihood: ${typeof epss.score === 'number' ? `${(epss.score * 100).toFixed(2)}%` : 'unavailable'}${typeof epss.percentile === 'number' ? ` · ${(epss.percentile * 100).toFixed(1)}th percentile` : ''} · Score date ${escapeHtml(epss.score_date || 'unavailable')} · Retrieved ${escapeHtml(niceDate(epss.observed_at))}${epssUrl ? ` · <a href="${escapeHtml(epssUrl)}" target="_blank" rel="noopener noreferrer">EPSS source</a>` : ''}</p>`
+        : `<p class="page-description">No EPSS score was returned · Retrieved ${escapeHtml(niceDate(epss.observed_at))}${epssUrl ? ` · <a href="${escapeHtml(epssUrl)}" target="_blank" rel="noopener noreferrer">EPSS source</a>` : ''}</p>`;
+    const sourceLinks = (Array.isArray(detail.source_references) ? detail.source_references : [])
+      .map((reference) => {
+        const url = checkedHttpUrl(reference?.url);
+        if (!url) return null;
+        const label = reference.source || new URL(url).hostname;
+        return `<li><a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>${Array.isArray(reference.tags) && reference.tags.length ? ` · ${escapeHtml(reference.tags.join(', '))}` : ''}</li>`;
+      })
+      .filter(Boolean);
+    const remediationSourceLinks = (Array.isArray(detail.remediation_sources) ? detail.remediation_sources : [])
+      .map((reference) => {
+        const url = checkedHttpUrl(reference?.url);
+        if (!url) return null;
+        const label = reference.source || new URL(url).hostname;
+        return `<li><a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>${Array.isArray(reference.tags) && reference.tags.length ? ` · ${escapeHtml(reference.tags.join(', '))}` : ''}</li>`;
+      })
+      .filter(Boolean);
+    const citationsHtml = sourceLinks.length
+      ? `<ul class="evidence-list">${sourceLinks.join('')}</ul>`
+      : '<div class="review-callout" style="margin:0">No validated advisory reference is available.</div>';
+    const remediationCitationsHtml = remediationSourceLinks.length
+      ? `<ul class="evidence-list">${remediationSourceLinks.join('')}</ul>`
+      : '<div class="review-callout" style="margin:0">No patch or mitigation reference is tagged in the source data. Treat this action as unverified and request analyst review.</div>';
+    const citationStatusLabel = detail.remediation_citation_status === 'cited' && remediationSourceLinks.length
+      ? 'Supporting patch or mitigation reference available'
+      : 'Unverified · no tagged supporting reference';
+    const storedBreakdown = alert.score_breakdown || {};
     const breakdown = {
-      CVSS: advisory.cvss ?? 'Unavailable',
-      'KEV bonus': isKev ? '+2.0' : '+0.0',
-      'Internet-facing': asset.internet_facing ? '+1.5' : '+0.0',
-      'Asset criticality': ({ critical: '+2.0', high: '+1.0', medium: '+0.0', low: '-1.0' })[asset.criticality] ?? 'Unavailable',
+      CVSS: storedBreakdown.cvss ?? advisory.cvss ?? 'Unavailable',
+      'KEV bonus': storedBreakdown.kev ?? 'Unavailable',
+      'Internet-facing': storedBreakdown.internet_facing ?? 'Unavailable',
+      'Asset criticality': storedBreakdown.criticality ?? 'Unavailable',
+      'KEV + internet-facing P1 rule': storedBreakdown.kev_internet_p1_override
+        ? 'Applied'
+        : 'Not applied',
     };
     drawerRoot.innerHTML = `<div class="drawer-backdrop" data-close-drawer></div><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title"><div class="drawer-head"><div class="drawer-kicker"><span>ALERT DETAIL - ${escapeHtml(alert.alert_id)}</span><button class="icon-button" type="button" aria-label="Close alert details" data-close-drawer>&times;</button></div><h2 class="drawer-title" id="drawer-title">${escapeHtml(advisory.title || alert.cve_id)}</h2><div class="drawer-subtitle mono">${escapeHtml(alert.cve_id)} - ${escapeHtml(sourceLabel(advisory))}</div></div><div class="drawer-body">
       <div class="drawer-status-row">${priorityBadge(alert.priority)}${statusBadge('Affected')}<span class="tag">SLA ${alert.sla_hours} h</span>${isKev ? '<span class="tag kev-tag">KEV-listed</span>' : ''}</div>
       <section class="drawer-block"><h3>Affected service</h3><div class="asset-box"><strong>${escapeHtml(alert.service)}</strong><p>${escapeHtml(alert.component)} ${escapeHtml(alert.installed_version)} -&gt; fix ${escapeHtml(alert.fixed_version || 'not published')}</p><div class="asset-meta"><span>Asset <strong class="mono">${escapeHtml(alert.asset_id)}</strong></span><span>Owner <strong>${escapeHtml(alert.owner)}</strong></span><span>${asset.internet_facing ? 'Internet-facing' : 'Internal'}</span><span>${escapeHtml(criticality)} criticality</span></div></div></section>
-      <section class="drawer-block"><h3>Why this priority</h3><div class="score-box"><div class="score-top"><span>Risk score</span><strong>${Number(alert.risk_score).toFixed(1)}</strong></div><div class="score-factors">${Object.entries(breakdown).map(([name, value]) => `<div class="factor-row"><span>${escapeHtml(name)}</span><strong>${typeof value === 'number' ? value.toFixed(1) : escapeHtml(value)}</strong></div>`).join('')}</div></div></section>
-      <section class="drawer-block"><h3>Recommended action</h3><div class="fix-box"><strong>Recommended remediation</strong>${escapeHtml(alert.remediation)}</div></section>
+      <section class="drawer-block"><h3>Why this priority <span class="mono-label">Policy ${escapeHtml(detail.policy_version || 'unknown')}</span></h3><div class="score-box"><div class="score-top"><span>Risk score</span><strong>${Number(alert.risk_score).toFixed(1)}</strong></div><div class="score-factors">${Object.entries(breakdown).map(([name, value]) => `<div class="factor-row"><span>${escapeHtml(name)}</span><strong>${typeof value === 'number' ? value.toFixed(1) : escapeHtml(value)}</strong></div>`).join('')}</div></div></section>
+      <section class="drawer-block"><h3>Recommended action</h3><div class="fix-box"><strong>Recommended remediation</strong><p>${escapeHtml(alert.remediation)}</p><span class="mono-label">${escapeHtml(citationStatusLabel)}</span></div></section>
+      <section class="drawer-block"><h3>Remediation evidence</h3>${remediationCitationsHtml}</section>
+      <section class="drawer-block"><h3>Source references</h3>${citationsHtml}</section>
+      <section class="drawer-block"><h3>Impact assessment</h3><div class="review-callout" style="margin:0">${escapeHtml(alert.summary)}</div></section>
       <section class="drawer-block"><h3>Match decision</h3><div class="review-callout" style="margin:0">${escapeHtml(friendlyName(match.outcome || 'affected'))} · ${escapeHtml(match.comparator || 'comparator unavailable')} · Confidence ${match.confidence == null ? 'not quantified' : `${Math.round(match.confidence * 100)}%`}<br>Affected range: ${escapeHtml(match.affected_range || 'unavailable')}</div><ul class="evidence-list">${[...new Set([...(match.evidence || []), ...(alert.evidence || [])])].map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul></section>
        <section class="drawer-block"><h3>Comparison history</h3>${matchHistoryHtml}${matchHistoryLimit}</section>
-      <section class="drawer-block"><h3>Advisory context</h3><div class="review-callout" style="margin:0">${escapeHtml(advisory.text || alert.summary)}<br><br><span class="mono-label">Published ${escapeHtml(advisory.published || 'date unavailable')} | CVSS ${advisory.cvss ?? 'unavailable'} | KEV ${isKev ? 'Yes' : 'No'}</span></div></section>
+      <section class="drawer-block"><h3>Advisory context</h3><div class="review-callout" style="margin:0">${escapeHtml(advisory.text || alert.summary)}<br><br><span class="mono-label">Published ${escapeHtml(advisory.published || 'date unavailable')} | CVSS ${advisory.cvss ?? 'unavailable'} | KEV ${isKev ? 'Yes' : 'No'}</span>${epssHtml}</div></section>
       <div class="drawer-footer"><span>Evidence from the persisted run</span><button class="button small" type="button" data-copy-alert="${escapeHtml(alert.cve_id)}">Copy CVE ID</button></div>
       </div></aside>`;
     drawerRoot.querySelectorAll('[data-close-drawer]').forEach((element) => element.addEventListener('click', closeDrawer));

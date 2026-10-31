@@ -1,8 +1,8 @@
 """Versioned encryption key-provider boundary for LLM audit artifacts.
 
-The local provider reads one active key from process configuration. Deployments can
-replace the provider implementation with a managed KMS adapter without changing the
-artifact storage or access paths.
+The local provider reads retained keys by immutable version from process configuration,
+with a legacy single-key fallback for the active version. Deployments can replace the
+provider with a managed KMS adapter without changing artifact storage or access paths.
 """
 
 from __future__ import annotations
@@ -21,20 +21,22 @@ class EncryptionKeyProvider(Protocol):
 
 
 class LocalEnvironmentKeyProvider:
-    """Resolve the single active AES-256 key supplied by local environment settings."""
+    """Resolve versioned AES-256 keys from the local environment."""
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
 
     def get_key(self, version: str) -> bytes:
-        if version != self._settings.llm_audit_encryption_key_version:
-            raise RuntimeError("Artifact key version unavailable")
-        configured = self._settings.llm_audit_encryption_key
-        if configured is None:
+        configured_keys = self._settings.llm_audit_encryption_keys
+        encoded = configured_keys.get(version)
+        if encoded is None and version == self._settings.llm_audit_encryption_key_version:
+            configured = self._settings.llm_audit_encryption_key
+            encoded = configured.get_secret_value() if configured is not None else None
+        if encoded is None:
             raise RuntimeError("LLM audit encryption key is not configured")
         try:
             key = base64.b64decode(
-                configured.get_secret_value().encode("ascii"),
+                encoded.encode("ascii"),
                 altchars=b"-_",
                 validate=True,
             )

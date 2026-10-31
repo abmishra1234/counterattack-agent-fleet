@@ -30,6 +30,7 @@ from counterstrike.db_models import (
     SourceCheckpoint,
 )
 from counterstrike.models import FleetState
+from counterstrike.risk_policy import POLICY_VERSION
 
 
 def _json(value: Any) -> Any:
@@ -58,7 +59,7 @@ def _persist_source_syncs(session: Session, run_id: str, state: FleetState) -> N
         if status not in {"success", "partial", "failure", "skipped"}:
             raise ValueError("invalid_source_sync_status")
         cursor = sync.get("next_cursor")
-        if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 20_000):
+        if cursor is not None and (not isinstance(cursor, str) or len(cursor) > 2_000_000):
             raise ValueError("invalid_source_sync_cursor")
 
         source_name = f"public:{source_id}"
@@ -191,7 +192,7 @@ def persist_run_results(
     run_id: str,
     state: FleetState,
     *,
-    policy_version: str = "risk-v1",
+    policy_version: str = POLICY_VERSION,
     settings: Settings | None = None,
 ) -> RunRecord:
     """Persist a complete graph result atomically with run completion.
@@ -261,8 +262,8 @@ def persist_run_results(
                 title=advisory.title[:500],
                 published_at=_date(advisory.published),
                 cvss=Decimal(str(advisory.cvss)) if advisory.cvss is not None else None,
-                source_url=None,
-                source_references=[],
+                source_url=advisory.source_url,
+                source_references=advisory.source_references or [],
                 content_hash=content_hash,
                 raw_payload_hash=content_hash,
                 normalized_payload=normalized_payload,
@@ -404,9 +405,11 @@ def persist_run_results(
             summary=alert.summary,
             remediation=alert.remediation,
             evidence=alert.evidence,
-            source_references=[
-                {"advisory_id": advisory.external_id}
-            ] if advisory else [],
+            source_references=(
+                [*advisory.source_references, {"advisory_id": advisory.external_id}]
+                if advisory
+                else []
+            ),
         )
         session.add(row)
         session.flush()

@@ -282,9 +282,49 @@ class GatewayLLM:
                 with httpx.Client(
                     timeout=settings.llm_timeout_seconds, follow_redirects=False
                 ) as client:
-                    response = client.post(endpoint, headers=headers, content=request_body)
+                    with client.stream(
+                        "POST", endpoint, headers=headers, content=request_body
+                    ) as streamed_response:
+                        response_status = streamed_response.status_code
+                        response_headers = dict(streamed_response.headers)
+                        response_chunks = []
+                        response_size = 0
+                        response_too_large = False
+                        for chunk in streamed_response.iter_bytes(chunk_size=64 * 1024):
+                            remaining = settings.llm_max_response_bytes + 1 - response_size
+                            response_chunks.append(chunk[:remaining])
+                            response_size += min(len(chunk), remaining)
+                            if response_size > settings.llm_max_response_bytes:
+                                response_too_large = True
+                                break
+                    response = httpx.Response(
+                        response_status,
+                        headers=response_headers,
+                        content=b"".join(response_chunks),
+                    )
                 latency_ms = round((time.perf_counter() - started) * 1000)
-                if not 200 <= response.status_code < 300:
+                if response_too_large:
+                    error_code = "provider_response_too_large"
+                    self._persist_failure(
+                        record_id=record.id,
+                        error_code=error_code,
+                        safe_error="Provider response exceeded the configured byte limit",
+                        latency_ms=latency_ms,
+                        response_status=response.status_code,
+                        provider_secret=api_key,
+                        attempt=attempt_base + retry_index,
+                    )
+                    logger.warning(
+                        "LLM provider response exceeded the configured byte limit",
+                        extra={
+                            "event": "llm.call.attempt_failed",
+                            "run_id": self.run_id,
+                            "attempt": attempt_base + retry_index,
+                            "error_code": error_code,
+                        },
+                    )
+                    last_error_code = error_code
+                elif not 200 <= response.status_code < 300:
                     status = response.status_code
                     error_code = (
                         "provider_rate_limited" if status == 429 else

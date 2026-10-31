@@ -65,6 +65,22 @@ class OSVLookupBatch:
 
 
 @dataclass(frozen=True)
+class EPSSScore:
+    cve_id: str
+    score: float
+    percentile: float
+    score_date: str | None
+
+
+@dataclass(frozen=True)
+class EPSSLookupBatch:
+    source_id: str
+    fetched_at: datetime
+    requested_ids: tuple[str, ...]
+    scores: tuple[EPSSScore, ...]
+
+
+@dataclass(frozen=True)
 class PublicFeedBundle:
     advisories: tuple[Advisory, ...]
     kev_ids: tuple[str, ...]
@@ -80,6 +96,10 @@ class FeedFetchError(RuntimeError):
         super().__init__(f"{source_id} feed request failed ({category})")
         self.source_id = source_id
         self.category = category
+
+
+MAX_EPSS_BACKLOG_IDS = 50_000
+MAX_EPSS_CURSOR_CHARS = 2_000_000
 
 
 class PublicSourceHTTPClient:
@@ -116,7 +136,7 @@ class PublicSourceHTTPClient:
                 content_length = response.headers.get("content-length")
                 if content_length and int(content_length) > self._max_response_bytes:
                     raise FeedFetchError(source_id, "response_too_large")
-                for chunk in response.iter_bytes():
+                for chunk in response.iter_bytes(chunk_size=64 * 1024):
                     body.extend(chunk)
                     if len(body) > self._max_response_bytes:
                         raise FeedFetchError(source_id, "response_too_large")
@@ -165,6 +185,49 @@ def _nvd_cvss(cve: dict[str, Any]) -> float | None:
             if isinstance(score, int | float) and 0 <= score <= 10:
                 return float(score)
     return None
+
+
+def _nvd_references(cve: dict[str, Any]) -> list[dict[str, Any]]:
+    references = cve.get("references")
+    if not isinstance(references, list):
+        return []
+    normalized = []
+    for item in references:
+        if not isinstance(item, dict):
+            continue
+        raw_url = item.get("url")
+        if not isinstance(raw_url, str) or len(raw_url) > 1500:
+            continue
+        try:
+            parsed = urlsplit(raw_url.strip())
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            continue
+        try:
+            ascii_hostname = hostname.encode("idna").decode("ascii") if hostname else ""
+        except UnicodeError:
+            continue
+        if (
+            parsed.scheme.lower() not in {"http", "https"}
+            or not ascii_hostname
+            or not re.fullmatch(r"[A-Za-z0-9.:-]+", ascii_hostname)
+            or parsed.username is not None
+            or parsed.password is not None
+            or (port is not None and not 1 <= port <= 65535)
+        ):
+            continue
+        reference = {"url": raw_url.strip()}
+        source = item.get("source")
+        if isinstance(source, str) and source.strip():
+            reference["source"] = source.strip()[:200]
+        tags = item.get("tags")
+        if isinstance(tags, list):
+            reference["tags"] = [tag[:80] for tag in tags if isinstance(tag, str)][:10]
+        normalized.append(reference)
+        if len(normalized) == 30:
+            break
+    return normalized
 
 
 def _iso_millis(value: datetime) -> str:
@@ -241,7 +304,11 @@ class NVDFeedAdapter:
             if not isinstance(cve, dict):
                 continue
             cve_id = cve.get("id")
-            if not isinstance(cve_id, str) or not re.fullmatch(r"CVE-\d{4}-\d{4,}", cve_id):
+            if (
+                not isinstance(cve_id, str)
+                or len(cve_id) > 32
+                or not re.fullmatch(r"CVE-\d{4}-\d{4,}", cve_id)
+            ):
                 continue
             description = _first_text(cve.get("descriptions")) or ""
             published = cve.get("published")
@@ -251,6 +318,9 @@ class NVDFeedAdapter:
                 Advisory(
                     id=cve_id,
                     source="nvd",
+                    source_url=self.endpoint,
+                    source_retrieved_at=now.isoformat(),
+                    source_references=_nvd_references(cve),
                     published=published,
                     title=f"{cve_id}: {description[:400]}" if description else cve_id,
                     cvss=_nvd_cvss(cve),
@@ -369,20 +439,89 @@ class OSVEnrichmentAdapter:
         )
 
 
+class EPSSEnrichmentAdapter:
+    """Look up current EPSS scores for a bounded batch of CVE identifiers."""
+
+    source_id = "epss"
+    endpoint = "https://api.first.org/data/v1/epss"
+    max_cves_per_request = 100
+    max_query_chars = 2000
+
+    def __init__(
+        self,
+        *,
+        client: PublicSourceHTTPClient | None = None,
+        timeout_seconds: float = 20,
+    ):
+        self.client = client or PublicSourceHTTPClient(timeout_seconds=timeout_seconds)
+
+    def fetch(self, cve_ids: tuple[str, ...]) -> EPSSLookupBatch:
+        requested = tuple(dict.fromkeys(cve_ids))
+        if not requested or len(requested) > self.max_cves_per_request:
+            raise ValueError("EPSS lookups require 1 to 100 CVE IDs")
+        if any(
+            len(cve_id) > 32 or not re.fullmatch(r"CVE-\d{4}-\d{4,}", cve_id)
+            for cve_id in requested
+        ):
+            raise ValueError("EPSS lookup accepts CVE IDs only")
+        joined_ids = ",".join(requested)
+        if len(joined_ids) > self.max_query_chars:
+            raise ValueError("EPSS CVE query exceeds the documented size limit")
+
+        payload = self.client.get_json(self.source_id, self.endpoint, params={"cve": joined_ids})
+        records = payload.get("data")
+        if not isinstance(records, list):
+            raise FeedFetchError(self.source_id, "unexpected_response_shape")
+        requested_set = set(requested)
+        scores: dict[str, EPSSScore] = {}
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            cve_id = record.get("cve")
+            if not isinstance(cve_id, str) or cve_id not in requested_set:
+                raise FeedFetchError(self.source_id, "identifier_mismatch")
+            try:
+                score = float(record["epss"])
+                percentile = float(record["percentile"])
+            except (KeyError, TypeError, ValueError):
+                raise FeedFetchError(self.source_id, "invalid_score") from None
+            if not (0 <= score <= 1 and 0 <= percentile <= 1):
+                raise FeedFetchError(self.source_id, "invalid_score")
+            score_date = record.get("date")
+            scores[cve_id] = EPSSScore(
+                cve_id=cve_id,
+                score=score,
+                percentile=percentile,
+                score_date=score_date if isinstance(score_date, str) else None,
+            )
+        return EPSSLookupBatch(
+            source_id=self.source_id,
+            fetched_at=datetime.now(timezone.utc),
+            requested_ids=requested,
+            scores=tuple(scores[cve_id] for cve_id in requested if cve_id in scores),
+        )
+
+
 def fetch_public_feed_bundle(
     *,
     nvd_api_key: str | None = None,
     timeout_seconds: float = 20,
     nvd_cursor: str | None = None,
+    epss_cursor: str | None = None,
+    epss_enabled: bool = False,
     max_nvd_pages: int = 5,
+    max_epss_requests: int = 34,
 ) -> PublicFeedBundle:
     """Fetch a bounded NVD page window and independent KEV/OSV enrichments."""
     if not 1 <= max_nvd_pages <= 20:
         raise ValueError("NVD page bound must be between 1 and 20")
+    if not 1 <= max_epss_requests <= 50:
+        raise ValueError("EPSS request bound must be between 1 and 50")
     client = PublicSourceHTTPClient(timeout_seconds=timeout_seconds)
     nvd = NVDFeedAdapter(api_key=nvd_api_key, client=client)
     kev_adapter = CISAKEVEnrichmentAdapter(client=client)
     osv = OSVEnrichmentAdapter(client=client)
+    epss = EPSSEnrichmentAdapter(client=client)
     advisories: list[Advisory] = []
     syncs: list[dict[str, Any]] = []
     trace: list[dict[str, Any]] = []
@@ -390,8 +529,13 @@ def fetch_public_feed_bundle(
     kev_ids: tuple[str, ...] = ()
     try:
         cursor = nvd_cursor
+        bounded_nvd_pages = max_nvd_pages
+        if epss_enabled:
+            worst_case_cves_per_request = epss.max_query_chars // 33
+            epss_capacity = max_epss_requests * worst_case_cves_per_request
+            bounded_nvd_pages = min(max_nvd_pages, max(1, epss_capacity // 2000))
         try:
-            for _ in range(max_nvd_pages):
+            for _ in range(bounded_nvd_pages):
                 page = nvd.fetch(cursor)
                 advisories.extend(page.advisories)
                 cursor = page.next_cursor
@@ -437,6 +581,21 @@ def fetch_public_feed_bundle(
                     "advisories": len(advisories),
                 }
             )
+
+        enrichments.extend(
+            {
+                "advisory_id": advisory.id,
+                "source_id": nvd.source_id,
+                "kind": "references",
+                "source_url": advisory.source_url,
+                "observed_at": advisory.source_retrieved_at,
+                "value": {
+                    "status": "available" if advisory.source_references else "unavailable",
+                    "references": advisory.source_references,
+                },
+            }
+            for advisory in advisories
+        )
 
         try:
             catalog = kev_adapter.fetch()
@@ -592,6 +751,125 @@ def fetch_public_feed_bundle(
                 "advisories": osv_count,
             }
         )
+
+        if epss_enabled:
+            pending_ids: list[str] = []
+            if epss_cursor is not None:
+                try:
+                    cursor_state = json.loads(epss_cursor)
+                    pending_ids = cursor_state["remaining"]
+                    invalid_pending = not isinstance(pending_ids, list)
+                    if not invalid_pending:
+                        invalid_pending = len(pending_ids) > MAX_EPSS_BACKLOG_IDS or any(
+                            not isinstance(cve_id, str)
+                            or len(cve_id) > 32
+                            or not re.fullmatch(r"CVE-\d{4}-\d{4,}", cve_id)
+                            for cve_id in pending_ids
+                        )
+                    if invalid_pending:
+                        raise ValueError
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    raise ValueError("Invalid EPSS enrichment cursor") from None
+            candidate_ids = dict.fromkeys(
+                [*pending_ids, *(advisory.id for advisory in advisories)]
+            )
+            epss_ids = list(candidate_ids)
+            if len(epss_ids) > MAX_EPSS_BACKLOG_IDS:
+                raise ValueError("EPSS enrichment backlog exceeds the supported bound")
+
+            epss_batches: list[tuple[str, ...]] = []
+            current_batch: list[str] = []
+            current_query_chars = 0
+            for cve_id in epss_ids:
+                next_chars = current_query_chars + len(cve_id) + bool(current_batch)
+                if current_batch and (
+                    len(current_batch) >= epss.max_cves_per_request
+                    or next_chars > epss.max_query_chars
+                ):
+                    epss_batches.append(tuple(current_batch))
+                    current_batch = []
+                    current_query_chars = 0
+                    next_chars = len(cve_id)
+                if next_chars > epss.max_query_chars:
+                    raise ValueError("EPSS CVE identifier exceeds the documented query limit")
+                current_batch.append(cve_id)
+                current_query_chars = next_chars
+            if current_batch:
+                epss_batches.append(tuple(current_batch))
+
+            processed_ids: list[str] = []
+            epss_scores: dict[str, EPSSScore] = {}
+            epss_retrieved_at: dict[str, datetime] = {}
+            epss_error: str | None = None
+            for batch_ids in epss_batches[:max_epss_requests]:
+                try:
+                    batch = epss.fetch(batch_ids)
+                except FeedFetchError as exc:
+                    epss_error = exc.category
+                    break
+                processed_ids.extend(batch.requested_ids)
+                epss_scores.update({score.cve_id: score for score in batch.scores})
+                epss_retrieved_at.update(
+                    {cve_id: batch.fetched_at for cve_id in batch.requested_ids}
+                )
+
+            epss_remaining = epss_ids[len(processed_ids) :]
+            epss_next_cursor = (
+                json.dumps({"remaining": epss_remaining}, separators=(",", ":"))
+                if epss_remaining
+                else None
+            )
+            if epss_next_cursor is not None and len(epss_next_cursor) > MAX_EPSS_CURSOR_CHARS:
+                raise ValueError("EPSS enrichment cursor exceeds the supported bound")
+            epss_status = (
+                "skipped"
+                if not epss_ids
+                else "partial"
+                if epss_error or epss_next_cursor
+                else "success"
+            )
+            epss_enrichments = [
+                {
+                    "advisory_id": cve_id,
+                    "source_id": epss.source_id,
+                    "kind": "epss",
+                    "source_url": epss.endpoint,
+                    "observed_at": epss_retrieved_at[cve_id].isoformat(),
+                    "value": {
+                        "status": "available" if cve_id in epss_scores else "not_scored",
+                        "score": epss_scores[cve_id].score if cve_id in epss_scores else None,
+                        "percentile": (
+                            epss_scores[cve_id].percentile if cve_id in epss_scores else None
+                        ),
+                        "score_date": (
+                            epss_scores[cve_id].score_date if cve_id in epss_scores else None
+                        ),
+                    },
+                }
+                for cve_id in processed_ids
+            ]
+            enrichments.extend(epss_enrichments)
+            syncs.append(
+                {
+                    "source_id": epss.source_id,
+                    "status": epss_status,
+                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                    "next_cursor": epss_next_cursor,
+                    "record_count": len(processed_ids),
+                    "error_code": epss_error,
+                }
+            )
+            trace.append(
+                {
+                    "agent": "source_epss",
+                    "source_id": epss.source_id,
+                    "source_status": epss_status,
+                    "source_error_code": epss_error,
+                    "advisories": len(processed_ids),
+                    "scores_available": len(epss_scores),
+                    "backlog_remaining": len(epss_remaining),
+                }
+            )
     finally:
         client.close()
 

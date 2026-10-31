@@ -35,6 +35,8 @@ def ingest_agent(
             ),
             timeout_seconds=settings.public_feed_timeout_seconds,
             nvd_cursor=(source_cursors or {}).get("nvd"),
+            epss_cursor=(source_cursors or {}).get("epss"),
+            epss_enabled=settings.epss_enabled and settings.epss_approved,
         )
         advisories = list(bundle.advisories)
         kev = list(bundle.kev_ids)
