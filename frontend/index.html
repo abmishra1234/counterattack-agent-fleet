@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#172b4d">
+    <title>Counterstrike | Vulnerability Operations</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Main navigation">
+        <a class="brand" href="#overview" aria-label="Counterstrike overview">
+          <span class="brand-mark">C</span>
+          <span class="brand-copy"><strong>Counterstrike</strong><small>VULNERABILITY OPS</small></span>
+        </a>
+        <div class="nav-label">WORKSPACE</div>
+        <nav class="nav-list">
+          <a class="nav-item active" href="#overview" data-page="overview"><span class="nav-icon">◫</span><span>Overview</span></a>
+          <a class="nav-item" href="#alerts" data-page="alerts"><span class="nav-icon">◆</span><span>Alerts</span><span class="nav-count" id="nav-alert-count">0</span></a>
+          <a class="nav-item" href="#review" data-page="review"><span class="nav-icon">◎</span><span>Needs review</span><span class="nav-count review-count" id="nav-review-count">0</span></a>
+          <a class="nav-item" href="#health" data-page="health"><span class="nav-icon">⌁</span><span>Run health</span></a>
+        </nav>
+        <div class="sidebar-spacer"></div>
+        <div class="demo-card">
+          <span class="demo-dot"></span>
+          <div><strong>Prototype preview</strong><small>Local fixture data</small></div>
+        </div>
+        <div class="sidebar-foot">COUNTERSTRIKE LITE <span>v0.1</span></div>
+      </aside>
+
+      <main class="main-area">
+        <header class="topbar">
+          <div class="mobile-brand"><span class="brand-mark">C</span><strong>Counterstrike</strong></div>
+          <div class="topbar-context"><span class="context-dot"></span><span>Environment</span><strong>LOCAL DEMO</strong></div>
+          <div class="topbar-right">
+            <div class="run-indicator"><span class="status-dot"></span><span id="top-run-status">Loading run…</span></div>
+            <span class="topbar-divider"></span>
+            <span class="avatar" aria-label="Prototype operator">PO</span>
+          </div>
+        </header>
+        <div id="app" class="page-content" aria-live="polite">
+          <div class="loading-state"><span class="spinner"></span>Loading the latest local run…</div>
+        </div>
+        <footer class="page-footer"><span>Counterstrike vulnerability triage</span><span>Preview only · no changes are made to managed systems</span></footer>
+      </main>
+    </div>
+    <div id="drawer-root"></div>
+    <div id="toast-root" class="toast-root" aria-live="polite"></div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>
