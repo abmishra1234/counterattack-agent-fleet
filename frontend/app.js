@@ -13,6 +13,8 @@ let usageLoadSequence = 0;
 let inventoryOffset = 0;
 let inventorySearch = '';
 let inventoryCriticality = '';
+let inventoryAssetType = '';
+let inventoryClassification = '';
 let inventoryRequestSequence = 0;
 
 const escapeHtml = (value = '') => String(value).replace(/[&<>"']/g, (char) => ({
@@ -294,6 +296,8 @@ async function renderInventory() {
   const params = new URLSearchParams({ limit: '50', offset: String(inventoryOffset) });
   if (inventorySearch.trim()) params.set('search', inventorySearch.trim());
   if (inventoryCriticality) params.set('criticality', inventoryCriticality);
+  if (inventoryAssetType) params.set('asset_type', inventoryAssetType);
+  if (inventoryClassification) params.set('data_classification', inventoryClassification);
   app.innerHTML = `${pageHeading('WORKSPACE / INVENTORY', 'Fleet inventory', 'Review the versioned inventory snapshot used for vulnerability correlation.')}<article class="panel table-panel"><div class="panel-header"><div class="panel-title">Loading inventory…</div></div></article>`;
   try {
     const result = await apiGet(`/api/v1/inventory?${params.toString()}`);
@@ -310,7 +314,7 @@ async function renderInventory() {
       <td>${escapeHtml(friendlyName(item.data_classification || 'not classified'))}</td>
     </tr>`).join('') : '<tr><td colspan="7"><div class="no-results">No inventory assets match these filters.</div></td></tr>';
     app.innerHTML = `${pageHeading('WORKSPACE / INVENTORY', 'Fleet inventory', 'Review the versioned inventory snapshot used for vulnerability correlation.')}
-      <div class="page-toolbar"><label class="searchbox"><span aria-hidden="true">⌕</span><input id="inventory-search" type="search" placeholder="Search asset, product, service, vendor or owner" value="${escapeHtml(inventorySearch)}" aria-label="Search inventory"></label><select class="select-control" id="inventory-criticality" aria-label="Filter by criticality"><option value="">All criticalities</option>${['critical', 'high', 'medium', 'low'].map((value) => `<option value="${value}" ${inventoryCriticality === value ? 'selected' : ''}>${friendlyName(value)}</option>`).join('')}</select><span class="feed-mode">PERSISTED SNAPSHOT</span></div>
+      <div class="page-toolbar"><label class="searchbox"><span aria-hidden="true">⌕</span><input id="inventory-search" type="search" placeholder="Search asset, product, service, vendor or owner" value="${escapeHtml(inventorySearch)}" aria-label="Search inventory"></label><select class="select-control" id="inventory-criticality" aria-label="Filter by criticality"><option value="">All criticalities</option>${['critical', 'high', 'medium', 'low'].map((value) => `<option value="${value}" ${inventoryCriticality === value ? 'selected' : ''}>${friendlyName(value)}</option>`).join('')}</select><select class="select-control" id="inventory-type" aria-label="Filter by asset type"><option value="">All asset types</option>${['application', 'service', 'vendor_product', 'saas'].map((value) => `<option value="${value}" ${inventoryAssetType === value ? 'selected' : ''}>${friendlyName(value)}</option>`).join('')}</select><select class="select-control" id="inventory-classification" aria-label="Filter by data classification"><option value="">All classifications</option>${['public', 'internal', 'confidential', 'restricted'].map((value) => `<option value="${value}" ${inventoryClassification === value ? 'selected' : ''}>${friendlyName(value)}</option>`).join('')}</select><span class="feed-mode">PERSISTED SNAPSHOT</span></div>
       <article class="panel table-panel"><div class="panel-header"><div><div class="panel-title">Inventory assets</div><div class="panel-subtitle">${result.snapshot_id ? `Snapshot ${escapeHtml(result.snapshot_id)}` : 'Current local inventory contract'}</div></div><span class="table-caption">${result.total} total</span></div>
       <div class="table-wrap"><table><thead><tr><th>Asset</th><th>Service / vendor</th><th>Product / installed component</th><th>Owner / contact</th><th>Criticality</th><th>Exposure</th><th>Data classification</th></tr></thead><tbody>${rows}</tbody></table></div>
       <div class="table-foot"><span>Showing ${first}–${last} of ${result.total} · Persisted run snapshot</span><div class="heading-actions"><button class="button small" id="inventory-prev" type="button" ${result.offset <= 0 ? 'disabled' : ''}>Previous</button><button class="button small" id="inventory-next" type="button" ${result.offset + items.length >= result.total ? 'disabled' : ''}>Next</button></div></div></article>`;
@@ -322,6 +326,16 @@ async function renderInventory() {
     });
     document.querySelector('#inventory-criticality').addEventListener('change', (event) => {
       inventoryCriticality = event.currentTarget.value;
+      inventoryOffset = 0;
+      renderInventory();
+    });
+    document.querySelector('#inventory-type').addEventListener('change', (event) => {
+      inventoryAssetType = event.currentTarget.value;
+      inventoryOffset = 0;
+      renderInventory();
+    });
+    document.querySelector('#inventory-classification').addEventListener('change', (event) => {
+      inventoryClassification = event.currentTarget.value;
       inventoryOffset = 0;
       renderInventory();
     });

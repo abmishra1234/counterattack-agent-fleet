@@ -230,10 +230,25 @@ class Settings(BaseModel):
         if value is None or not value.strip():
             return None
         value = value.strip().rstrip("/")
-        parsed = urlsplit(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-            raise ValueError("LLM_BASE_URL must be an absolute HTTP(S) URL")
-        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        try:
+            parsed = urlsplit(value)
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            raise ValueError("LLM_BASE_URL must be a valid absolute HTTP(S) URL") from None
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not hostname
+            or any(char.isspace() for char in value)
+            or port == 0
+        ):
+            raise ValueError("LLM_BASE_URL must be an absolute HTTP(S) URL with a valid host")
+        if (
+            parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
             raise ValueError(
                 "LLM_BASE_URL must not contain credentials, query parameters, or fragments"
             )
@@ -494,7 +509,23 @@ class Settings(BaseModel):
                 raise ValueError("Live LLM provider requires LLM_BASE_URL and LLM_API_KEY")
             if not self.llm_model or not self.llm_model.strip():
                 raise ValueError("Live LLM provider requires LLM_MODEL")
-            parsed = urlsplit(self.llm_base_url)
+            try:
+                parsed = urlsplit(self.llm_base_url)
+                has_authority = bool(parsed.hostname)
+                has_embedded_credentials = (
+                    parsed.username is not None or parsed.password is not None
+                )
+            except ValueError:
+                raise ValueError("LLM_BASE_URL must be a valid HTTP(S) endpoint") from None
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not has_authority
+                or has_embedded_credentials
+                or parsed.fragment
+            ):
+                raise ValueError(
+                    "LLM_BASE_URL must use HTTP(S), include a host, and omit credentials/fragments"
+                )
             if self.environment != "development" and parsed.scheme != "https":
                 raise ValueError("Live LLM calls require HTTPS outside development")
             if not self.llm_audit_content_capture:

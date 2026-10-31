@@ -57,6 +57,8 @@ AUDIT_QUERY_VALUE_PATTERNS = {
     "offset": re.compile(r"^[0-9]{1,7}$"),
     "priority": re.compile(r"^P[1-4]$"),
     "criticality": re.compile(r"^(critical|high|medium|low)$"),
+    "asset_type": re.compile(r"^(application|service|vendor_product|saas)$"),
+    "data_classification": re.compile(r"^(public|internal|confidential|restricted)$"),
     "internet_facing": re.compile(r"^(true|false)$"),
     "state": re.compile(r"^[a-z_]{1,24}$"),
     "status": re.compile(r"^[a-z_]{1,24}$"),
@@ -1660,6 +1662,12 @@ def create_app(settings=None):
         search: str | None = Query(default=None, max_length=200),
         criticality: Literal["critical", "high", "medium", "low"] | None = Query(default=None),
         internet_facing: bool | None = Query(default=None),
+        asset_type: Literal["application", "service", "vendor_product", "saas"] | None = Query(
+            default=None
+        ),
+        data_classification: Literal[
+            "public", "internal", "confidential", "restricted"
+        ] | None = Query(default=None),
         session=Depends(db_session),
     ):
         snapshot_id = session.scalar(
@@ -1682,6 +1690,12 @@ def create_app(settings=None):
             statement = statement.where(InventoryAsset.criticality == criticality)
         if internet_facing is not None:
             statement = statement.where(InventoryAsset.internet_facing.is_(internet_facing))
+        if asset_type is not None:
+            statement = statement.where(
+                InventoryAsset.extra_context["asset_type"].as_string() == asset_type
+            )
+        if data_classification is not None:
+            statement = statement.where(InventoryAsset.data_classification == data_classification)
         if search:
             pattern = f"%{search}%"
             statement = statement.where(
