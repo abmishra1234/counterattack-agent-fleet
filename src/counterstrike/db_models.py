@@ -208,7 +208,7 @@ class MatchRecord(Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.id"))
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False)
     advisory_id: Mapped[str] = mapped_column(ForeignKey("advisories.id"), nullable=False)
     inventory_asset_id: Mapped[str] = mapped_column(
         ForeignKey("inventory_assets.id"), nullable=False
@@ -297,7 +297,9 @@ class AuditEvent(Base):
     __tablename__ = "audit_events"
     __table_args__ = (
         UniqueConstraint("event_hash", name="uq_audit_event_hash"),
-        UniqueConstraint("sequence_number", name="uq_audit_sequence"),
+        # Match the name PostgreSQL assigns to the UNIQUE constraint created
+        # inline by the initial migration (sequence_number UNIQUE).
+        UniqueConstraint("sequence_number", name="audit_events_sequence_number_key"),
         Index("ix_audit_time_type", "occurred_at", "event_type"),
         Index("ix_audit_run", "run_id"),
         Index("ix_audit_actor", "actor_id"),
