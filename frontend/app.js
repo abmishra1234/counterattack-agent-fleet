@@ -634,6 +634,9 @@ async function openAlert(alertId) {
       ? 'listed'
       : advisory.in_kev === false ? 'not_listed' : 'unknown');
     const isKev = kevStatus === 'listed';
+    const kevStatusLabel = kevStatus === 'listed'
+      ? 'Yes'
+      : kevStatus === 'not_listed' ? 'No' : 'Unknown';
     const epss = advisory.epss || null;
     const epssUrl = checkedHttpUrl(epss?.source_url);
     const epssHtml = !epss
@@ -694,7 +697,7 @@ async function openAlert(alertId) {
        <section class="drawer-block"><h3>Impact assessment</h3><div class="review-callout" style="margin:0">${escapeHtml(alert.summary)}</div><div class="review-section-title">Evidence by dimension</div>${impactEvidenceHtml}</section>
        <section class="drawer-block"><h3>Match decision</h3><div class="review-callout" style="margin:0">${escapeHtml(friendlyName(match.outcome || 'affected'))} · ${escapeHtml(match.comparator || 'comparator unavailable')} · Confidence ${match.confidence == null ? 'not quantified' : `${Math.round(match.confidence * 100)}%`}<br>Affected range: ${escapeHtml(match.affected_range || 'unavailable')}</div><ul class="evidence-list">${[...new Set([...(match.evidence || []), ...matchEvidence])].map((line) => `<li>${escapeHtml(line)}</li>`).join('')}</ul></section>
        <section class="drawer-block"><h3>Comparison history</h3>${matchHistoryHtml}${matchHistoryLimit}</section>
-      <section class="drawer-block"><h3>Advisory context</h3><div class="review-callout" style="margin:0">${escapeHtml(advisory.text || alert.summary)}<br><br><span class="mono-label">Published ${escapeHtml(advisory.published || 'date unavailable')} | CVSS ${advisory.cvss ?? 'unavailable'} | KEV ${isKev ? 'Yes' : 'No'}</span>${epssHtml}</div></section>
+      <section class="drawer-block"><h3>Advisory context</h3><div class="review-callout" style="margin:0">${escapeHtml(advisory.text || alert.summary)}<br><br><span class="mono-label">Published ${escapeHtml(advisory.published || 'date unavailable')} | CVSS ${advisory.cvss ?? 'unavailable'} | KEV ${kevStatusLabel}</span>${epssHtml}</div></section>
       <div class="drawer-footer"><span>Evidence from the persisted run</span><button class="button small" type="button" data-copy-alert="${escapeHtml(alert.cve_id)}">Copy CVE ID</button></div>
       </div></aside>`;
     drawerRoot.querySelectorAll('[data-close-drawer]').forEach((element) => element.addEventListener('click', closeDrawer));
