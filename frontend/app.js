@@ -329,9 +329,12 @@ async function renderInventory(forceRefresh = false) {
   if (inventoryCriticality) params.set('criticality', inventoryCriticality);
   if (inventoryAssetType) params.set('asset_type', inventoryAssetType);
   if (inventoryClassification) params.set('data_classification', inventoryClassification);
-  app.innerHTML = `${pageHeading('WORKSPACE / INVENTORY', 'Fleet inventory', 'Review the versioned inventory snapshot used for vulnerability correlation.')}<article class="panel table-panel"><div class="panel-header"><div class="panel-title">Loading inventory…</div></div></article>`;
+  const cacheKey = params.toString();
+  const cacheEntry = inventoryPageCache.get(cacheKey);
+  if (forceRefresh || !cacheEntry || cacheEntry.expiresAt <= Date.now()) {
+    app.innerHTML = `${pageHeading('WORKSPACE / INVENTORY', 'Fleet inventory', 'Review the versioned inventory snapshot used for vulnerability correlation.')}<article class="panel table-panel"><div class="panel-header"><div class="panel-title">Loading inventory…</div></div></article>`;
+  }
   try {
-    const cacheKey = params.toString();
     const result = await cachedPageData(
       inventoryPageCache,
       inventoryPageRequests,
