@@ -311,6 +311,7 @@ class AuditEventItem(BaseModel):
     llm_call_id: str | None
     policy_version: str | None
     prompt_version: str | None
+    safe_details: dict[str, Any] = Field(default_factory=dict)
     previous_hash: str | None
     event_hash: str
 
@@ -1901,7 +1902,11 @@ def create_app(settings=None):
         return {
             "items": [
                 {
-                    field: getattr(event, field)
+                    field: (
+                        event.safe_details or {}
+                        if field == "safe_details"
+                        else getattr(event, field)
+                    )
                     for field in AuditEventItem.model_fields
                 }
                 for event in events
