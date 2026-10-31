@@ -15,6 +15,17 @@ alembic current
 alembic check
 ```
 
+The Compose stack separates database ownership from application access. Its
+`db-roles` one-shot service provisions `COUNTERSTRIKE_DB_RUNTIME_ROLE` using the
+owner connection before migrations run. Alembic uses the owner connection;
+the API and worker use the runtime role. The runtime role receives CRUD access
+to operational tables, but cannot update or delete `audit_events`,
+`llm_audit_access`, or `review_decisions`; it cannot delete encrypted artifacts
+or create schema objects. PostgreSQL triggers additionally restrict artifact
+updates to the one-time retention purge operation. Set distinct, URL-safe
+passwords for `POSTGRES_PASSWORD` and `COUNTERSTRIKE_DB_RUNTIME_PASSWORD` in
+local deployments.
+
 Use `alembic history` to review the revision chain. Keep each schema change in
 a new, reviewed revision. If a local downgrade is needed, use only a disposable
 database whose data can be lost; then upgrade back to `head` and inspect the

@@ -17,6 +17,21 @@ services:
     networks:
       - app-network
 
+  db-roles:
+    build:
+      context: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://counterstrike:${POSTGRES_PASSWORD:-counterstrike-local-only}@db:5432/counterstrike
+      COUNTERSTRIKE_DB_RUNTIME_ROLE: ${COUNTERSTRIKE_DB_RUNTIME_ROLE:-counterstrike_app}
+      COUNTERSTRIKE_DB_RUNTIME_PASSWORD: ${COUNTERSTRIKE_DB_RUNTIME_PASSWORD:-counterstrike-app-local-only}
+    command: ["python", "-m", "counterstrike.db_roles"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - app-network
+
   migrate:
     build:
       context: .
@@ -28,8 +43,8 @@ services:
       DATABASE_URL: postgresql+psycopg://counterstrike:${POSTGRES_PASSWORD:-counterstrike-local-only}@db:5432/counterstrike
     command: ["alembic", "upgrade", "head"]
     depends_on:
-      db:
-        condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
     restart: "no"
     networks:
       - app-network
@@ -46,7 +61,7 @@ services:
       API_HOST: 0.0.0.0
       API_PORT: 8000
       API_TRUSTED_LOCAL_CLIENT_CIDRS: ${COMPOSE_SUBNET:-172.16.240.0/24}
-      DATABASE_URL: postgresql+psycopg://counterstrike:${POSTGRES_PASSWORD:-counterstrike-local-only}@db:5432/counterstrike
+      DATABASE_URL: postgresql+psycopg://${COUNTERSTRIKE_DB_RUNTIME_ROLE:-counterstrike_app}:${COUNTERSTRIKE_DB_RUNTIME_PASSWORD:-counterstrike-app-local-only}@db:5432/counterstrike
       DATA_DIR: /app/data
       OUT_DIR: /app/out
       FRONTEND_DIR: /app/frontend
@@ -60,6 +75,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
     healthcheck:
@@ -85,7 +102,7 @@ services:
         required: false
     environment:
       COUNTERSTRIKE_ENV: ${COUNTERSTRIKE_ENV:-development}
-      DATABASE_URL: postgresql+psycopg://counterstrike:${POSTGRES_PASSWORD:-counterstrike-local-only}@db:5432/counterstrike
+      DATABASE_URL: postgresql+psycopg://${COUNTERSTRIKE_DB_RUNTIME_ROLE:-counterstrike_app}:${COUNTERSTRIKE_DB_RUNTIME_PASSWORD:-counterstrike-app-local-only}@db:5432/counterstrike
       DATA_DIR: /app/data
       OUT_DIR: /app/out
       LLM_PROVIDER: ${LLM_PROVIDER:-fake}
@@ -97,6 +114,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      db-roles:
+        condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
