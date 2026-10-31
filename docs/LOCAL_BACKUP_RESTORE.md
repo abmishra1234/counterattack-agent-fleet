@@ -45,6 +45,12 @@ Use a unique project name and a subnet that does not overlap the running stack. 
 $env:COMPOSE_SUBNET = '172.16.241.0/24'
 $env:API_PORT = '18001'
 docker compose -p counterstrike-restore-check up -d db
+for ($attempt = 0; $attempt -lt 60; $attempt++) {
+    docker compose -p counterstrike-restore-check exec -T db pg_isready --username=counterstrike --dbname=counterstrike
+    if ($LASTEXITCODE -eq 0) { break }
+    Start-Sleep -Seconds 2
+}
+if ($LASTEXITCODE -ne 0) { throw 'Restore database did not become ready.' }
 docker compose -p counterstrike-restore-check cp $backup db:/tmp/restore.dump
 docker compose -p counterstrike-restore-check exec -T db pg_restore --username=counterstrike --dbname=counterstrike --no-owner --no-acl /tmp/restore.dump
 ```
