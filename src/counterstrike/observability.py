@@ -24,6 +24,7 @@ _SAFE_EXTRA_FIELDS = (
     "method",
     "status_code",
     "duration_ms",
+    "request_id",
     "run_id",
     "job_id",
     "source_id",

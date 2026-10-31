@@ -2561,6 +2561,7 @@ def create_app(settings=None):
     async def correlated_access_log(request, call_next):
         supplied_id = request.headers.get("x-request-id", "")
         request_id = supplied_id if REQUEST_ID_PATTERN.fullmatch(supplied_id) else uuid.uuid4().hex
+        request.state.request_id = request_id
         token = request_id_context.set(request_id)
         started = datetime.now(timezone.utc)
         response = None
@@ -2753,6 +2754,7 @@ def create_app(settings=None):
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request, exc):
+        request_id = getattr(request.state, "request_id", None) or request_id_context.get()
         safe_errors = [
             {
                 "location": [str(part) for part in error.get("loc", ())],
@@ -2768,13 +2770,15 @@ def create_app(settings=None):
                     "code": "validation_error",
                     "message": "Request validation failed.",
                     "details": safe_errors,
-                    "request_id": request_id_context.get(),
+                    "request_id": request_id,
                 }
             },
+            headers={"X-Request-ID": request_id},
         )
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error_handler(request, exc):
+        request_id = getattr(request.state, "request_id", None) or request_id_context.get()
         code = "not_found" if exc.status_code == 404 else "http_error"
         message = (
             "The requested resource was not found."
@@ -2784,16 +2788,23 @@ def create_app(settings=None):
         return JSONResponse(
             status_code=exc.status_code,
             content={
-                "error": {"code": code, "message": message, "request_id": request_id_context.get()}
+                "error": {"code": code, "message": message, "request_id": request_id}
             },
-            headers=exc.headers,
+            headers={**(exc.headers or {}), "X-Request-ID": request_id},
         )
 
     @app.exception_handler(Exception)
     async def unexpected_error_handler(request, exc):
+        request_id = getattr(request.state, "request_id", None) or request_id_context.get()
         app_logger.error(
             "Unhandled application error",
-            extra={"event": "api.error.unhandled", "error_code": type(exc).__name__},
+            extra={
+                "event": "api.error.unhandled",
+                "error_code": type(exc).__name__,
+                "request_id": request_id,
+                "route": request.url.path[:200],
+                "method": request.method,
+            },
         )
         return JSONResponse(
             status_code=500,
@@ -2801,9 +2812,10 @@ def create_app(settings=None):
                 "error": {
                     "code": "internal_error",
                     "message": "The request could not be completed.",
-                    "request_id": request_id_context.get(),
+                    "request_id": request_id,
                 }
             },
+            headers={"X-Request-ID": request_id},
         )
 
     @app.get("/metrics", include_in_schema=False)
