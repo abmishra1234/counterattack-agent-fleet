@@ -263,7 +263,6 @@ function renderOverview() {
       <article class="panel today-panel"><div class="panel-header"><div><div class="panel-title">Also in this run</div><div class="panel-subtitle">A short list of other confirmed affected assets</div></div><a class="panel-link" href="#alerts" data-go="alerts">All ${model.alerts.length} findings →</a></div>${remaining.length ? `<div class="finding-list">${remaining.map((item) => `<button class="finding-row" type="button" data-featured-alert="${escapeHtml(item.alert_id)}"><span class="finding-priority ${priorityClass(item.priority)}">${escapeHtml(item.priority)}</span><span class="finding-main"><strong>${escapeHtml(item.cve_id)} <span>· ${escapeHtml(item.component)}</span></strong><small>${escapeHtml(item.service)} · ${escapeHtml(item.owner)}</small></span><span class="finding-score">${Number(item.risk_score).toFixed(1)}<small>risk</small></span><span class="finding-arrow">→</span></button>`).join('')}</div>` : '<div class="empty-inline">No additional findings in this run.</div>'}</article>
       <article class="panel posture-panel"><div class="panel-header"><div><div class="panel-title">Run snapshot</div><div class="panel-subtitle">Latest persisted run</div></div><span class="snapshot-count">${model.alerts.length}</span></div><div class="snapshot-total"><strong>${model.alerts.length}</strong><span>affected assets</span></div><div class="priority-chart snapshot-chart">${priorityChart()}</div><div class="snapshot-footer"><span>${scanCount} inventory assets scanned</span><span>${p1Count} P1</span></div></article>
     </section>`;
-  bindPageLinks();
   document.querySelectorAll('[data-featured-alert]').forEach((button) => button.addEventListener('click', () => openAlert(button.dataset.featuredAlert)));
   document.querySelector('#start-run')?.addEventListener('click', startManualRun);
 }
@@ -353,7 +352,7 @@ async function renderInventory(forceRefresh = false) {
       <td>${escapeHtml(friendlyName(item.data_classification || 'not classified'))}</td>
     </tr>`).join('') : '<tr><td colspan="7"><div class="no-results">No inventory assets match these filters.</div></td></tr>';
     app.innerHTML = `${pageHeading('WORKSPACE / INVENTORY', 'Fleet inventory', 'Review the versioned inventory snapshot used for vulnerability correlation.', '<button class="button small" id="inventory-refresh" type="button">Refresh</button>')}
-      <div class="page-toolbar"><label class="searchbox"><span aria-hidden="true">⌕</span><input id="inventory-search" type="search" placeholder="Search asset, product, service, vendor or owner" value="${escapeHtml(inventorySearch)}" aria-label="Search inventory"></label><select class="select-control" id="inventory-criticality" aria-label="Filter by criticality"><option value="">All criticalities</option>${['critical', 'high', 'medium', 'low'].map((value) => `<option value="${value}" ${inventoryCriticality === value ? 'selected' : ''}>${friendlyName(value)}</option>`).join('')}</select><select class="select-control" id="inventory-type" aria-label="Filter by asset type"><option value="">All asset types</option>${['application', 'service', 'vendor_product', 'saas'].map((value) => `<option value="${value}" ${inventoryAssetType === value ? 'selected' : ''}>${friendlyName(value)}</option>`).join('')}</select><select class="select-control" id="inventory-classification" aria-label="Filter by data classification"><option value="">All classifications</option>${['public', 'internal', 'confidential', 'restricted'].map((value) => `<option value="${value}" ${inventoryClassification === value ? 'selected' : ''}>${friendlyName(value)}</option>`).join('')}</select><span class="feed-mode">PERSISTED SNAPSHOT</span></div>
+      <div class="page-toolbar"><label class="searchbox"><span aria-hidden="true">⌕</span><input id="inventory-search" type="search" placeholder="Search asset, product, service, vendor or owner" value="${escapeHtml(inventorySearch)}" aria-label="Search inventory"></label><select class="select-control" id="inventory-criticality" aria-label="Filter by criticality"><option value="">All criticalities</option>${['critical', 'high', 'medium', 'low'].map((value) => `<option value="${value}" ${inventoryCriticality === value ? 'selected' : ''}>${friendlyName(value)}</option>`).join('')}</select><select class="select-control" id="inventory-type" aria-label="Filter by asset type"><option value="">All asset types</option>${['application', 'service', 'vendor_product', 'saas'].map((value) => `<option value="${value}" ${inventoryAssetType === value ? 'selected' : ''}>${friendlyName(value)}</option>`).join('')}</select><select class="select-control" id="inventory-classification" aria-label="Filter by data classification"><option value="">All classifications</option>${['public', 'internal', 'confidential', 'restricted'].map((value) => `<option value="${value}" ${inventoryClassification === value ? 'selected' : ''}>${friendlyName(value)}</option>`).join('')}</select><span class="feed-mode">Persisted snapshot · cached briefly</span></div>
       <article class="panel table-panel"><div class="panel-header"><div><div class="panel-title">Inventory assets</div><div class="panel-subtitle">${result.snapshot_id ? `Snapshot ${escapeHtml(result.snapshot_id)}` : 'Current local inventory contract'}</div></div><span class="table-caption">${result.total} total</span></div>
       <div class="table-wrap"><table><thead><tr><th>Asset</th><th>Service / vendor</th><th>Product / installed component</th><th>Owner / contact</th><th>Criticality</th><th>Exposure</th><th>Data classification</th></tr></thead><tbody>${rows}</tbody></table></div>
       <div class="table-foot"><span>Showing ${first}–${last} of ${result.total} · Persisted run snapshot</span><div class="heading-actions"><button class="button small" id="inventory-prev" type="button" ${result.offset <= 0 ? 'disabled' : ''}>Previous</button><button class="button small" id="inventory-next" type="button" ${result.offset + items.length >= result.total ? 'disabled' : ''}>Next</button></div></div></article>`;
@@ -472,7 +471,7 @@ function renderHealth() {
     }).join('')}</div></article>`;
 }
 function renderUsage() {
-  app.innerHTML = `${pageHeading('OPERATIONS / MODEL AUDIT', 'LLM usage & cost', 'Review model attempts, spend estimates, usage totals and protected prompt or response artifacts.')}
+  app.innerHTML = `${pageHeading('OPERATIONS / MODEL AUDIT', 'LLM usage & cost', 'Review model attempts, spend estimates, usage totals and protected prompt or response artifacts.', '<button class="button small" id="refresh-usage" type="button">Refresh</button>')}
     <section class="usage-filter-panel panel">
       <form id="llm-usage-filter" class="usage-filter-grid">
         <label><span>Since</span><input class="usage-input" name="since" type="datetime-local"></label>
@@ -494,12 +493,17 @@ function renderUsage() {
     </section>
     <div id="llm-usage-results" class="usage-results"><div class="panel loading-inline"><span class="spinner"></span>Loading usage records…</div></div>`;
   const filter = document.querySelector('#llm-usage-filter');
+  for (const [name, value] of Object.entries(usageFilterValues)) {
+    const control = filter.elements.namedItem(name);
+    if (control) control.value = value;
+  }
   filter.addEventListener('submit', (event) => {
     event.preventDefault();
     usageOffset = 0;
     usageReportOffset = 0;
-    loadUsageResults(filter);
+    loadUsageResults(filter, true);
   });
+  document.querySelector('#refresh-usage').addEventListener('click', () => loadUsageResults(filter, true));
   loadUsageResults(filter);
 }
 
@@ -518,9 +522,10 @@ function usageQuery(values) {
   return params;
 }
 
-async function loadUsageResults(filterForm) {
+async function loadUsageResults(filterForm, forceRefresh = false) {
   const sequence = ++usageLoadSequence;
   const values = Object.fromEntries(new FormData(filterForm).entries());
+  usageFilterValues = values;
   const baseParams = usageQuery(values);
   const reportParams = new URLSearchParams(baseParams);
   reportParams.set('group_by', values.group_by || 'day');
@@ -531,15 +536,26 @@ async function loadUsageResults(filterForm) {
   callParams.set('offset', String(usageOffset));
   const results = document.querySelector('#llm-usage-results');
   if (!results) return;
-  results.innerHTML = '<div class="panel loading-inline"><span class="spinner"></span>Loading usage records…</div>';
+  const runId = String(values.run_id || '').trim();
+  const budgetPath = runId ? `/api/v1/llm/budgets?run_id=${encodeURIComponent(runId)}` : '/api/v1/llm/budgets';
+  const cacheKey = JSON.stringify([callParams.toString(), reportParams.toString(), budgetPath]);
+  const cached = usagePageCache.get(cacheKey)?.expiresAt > Date.now();
+  if (!cached || forceRefresh) results.innerHTML = '<div class="panel loading-inline"><span class="spinner"></span>Loading usage records…</div>';
   try {
-    const runId = String(values.run_id || '').trim();
-    const budgetPath = runId ? `/api/v1/llm/budgets?run_id=${encodeURIComponent(runId)}` : '/api/v1/llm/budgets';
-    const [usage, report, budgets] = await Promise.all([
-      apiGet(`/api/v1/llm/usage?${callParams.toString()}`),
-      apiGet(`/api/v1/llm/usage/report?${reportParams.toString()}`),
-      apiGet(budgetPath),
-    ]);
+    const { usage, report, budgets } = await cachedPageData(
+      usagePageCache,
+      usagePageRequests,
+      cacheKey,
+      async () => {
+        const [usage, report, budgets] = await Promise.all([
+          apiGet(`/api/v1/llm/usage?${callParams.toString()}`),
+          apiGet(`/api/v1/llm/usage/report?${reportParams.toString()}`),
+          apiGet(budgetPath),
+        ]);
+        return { usage, report, budgets };
+      },
+      forceRefresh,
+    );
     if (sequence !== usageLoadSequence || !document.querySelector('#llm-usage-results')) return;
     const knownCosts = Object.entries(usage.known_cost_by_currency || {})
       .map(([currency, amount]) => `${escapeHtml(currency)} ${escapeHtml(amount)}`).join(' · ') || 'No priced calls';
@@ -622,10 +638,6 @@ async function openLLMCall(callId) {
     closeDrawer();
     toast(error.message || 'Could not load model call details');
   }
-}
-
-function bindPageLinks() {
-  document.querySelectorAll('[data-go]').forEach((link) => link.addEventListener('click', () => { activePage = link.dataset.go; }));
 }
 
 function bindAlertRows() {
@@ -763,14 +775,14 @@ function toast(message) {
   setTimeout(() => { toastRoot.innerHTML = ''; }, 2200);
 }
 
-  document.querySelectorAll('.nav-item').forEach((link) => link.addEventListener('click', () => { activePage = link.dataset.page; }));
 document.querySelector('#global-search').addEventListener('keydown', (event) => {
   if (event.key !== 'Enter') return;
   query = event.currentTarget.value;
-  activePage = 'alerts';
-  location.hash = 'alerts';
-  render();
-  document.querySelector('#alert-search')?.focus();
+  if (location.hash === '#alerts') {
+    activePage = 'alerts';
+    render();
+  } else location.hash = 'alerts';
+  requestAnimationFrame(() => document.querySelector('#alert-search')?.focus());
 });
 document.querySelector('#global-search').addEventListener('input', (event) => {
   if (activePage === 'alerts') {
@@ -783,7 +795,14 @@ document.querySelector('#global-search').addEventListener('input', (event) => {
 window.addEventListener('hashchange', () => {
   const hash = location.hash.slice(1);
   if (hash.startsWith('alert/')) { openAlert(decodeURIComponent(hash.slice(6))); return; }
-  if (['overview', 'inventory', 'alerts', 'review', 'health', 'usage'].includes(hash)) { activePage = hash; closeDrawer(); render(); }
-  else if (!hash) { activePage = 'overview'; render(); }
+  const page = ['overview', 'inventory', 'alerts', 'review', 'health', 'usage'].includes(hash)
+    ? hash
+    : hash ? null : 'overview';
+  if (!page) return;
+  const pageChanged = page !== activePage;
+  activePage = page;
+  if (!pageChanged && !drawerRoot.innerHTML) return;
+  closeDrawer();
+  render();
 });
 loadData();
