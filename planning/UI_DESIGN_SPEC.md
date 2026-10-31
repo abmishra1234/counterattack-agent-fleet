@@ -48,11 +48,31 @@ Inventory, policy, evaluation, notifications history and audit can begin as read
 
 ### Global frame
 
-- Header: **Counterstrike**, environment label (**LOCAL DEMO** / **STAGING**), and latest run time/status.
-- Navigation: Overview · Alerts · Needs review · Run status.
-- Every page shows when its data was last updated. If a run is stale or incomplete, show a persistent warning banner.
-- The prototype is desktop-first but usable at 768 px width; tables may become stacked rows on smaller screens.
-- Use plain labels alongside color. No status is communicated by color alone.
+Use a familiar security operations layout rather than a collection of unrelated cards:
+
+```text
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ Counterstrike   Vulnerability Operations             LOCAL DEMO   ● Updated  │  64 px top bar
+├─────────────────┬────────────────────────────────────────────────────────────┤
+│  Overview       │  Breadcrumb / page title                 [Run status]     │
+│  Alerts      08 │  Main page content                                        │
+│  Needs review 02│                                                            │
+│  Run status     │                                                            │
+│                 │                                                            │
+│  Counterstrike  │                                                            │
+│  Prototype      │                                                            │
+└─────────────────┴────────────────────────────────────────────────────────────┘
+   240 px sidebar                  Flexible content area
+```
+
+- **Top bar:** product mark/name at left; environment badge and last successful run at right. Keep global search out of the first release unless it can search all displayed fields reliably.
+- **Sidebar:** four labeled destinations with simple line icons and open-item counts. Highlight the current page with a pale blue background and a 3 px blue left edge. Keep the sidebar fixed on desktop; collapse it behind a menu below 900 px.
+- **Content area:** use a 12-column grid, 24 px gutters, 32 px page padding and a 1440 px maximum content width. Page title and one-sentence description come before filters, metrics or tables.
+- **Freshness:** show `Last run 10:15 · Completed` in the top bar. A stale or partial run adds a full-width amber/red notice below the page title with a link to Run status.
+- **Typography:** use system UI/Inter. Page titles 26 px/600; section titles 16–18 px/600; body 14–16 px; table labels 12–13 px. Use a monospace face for CVE IDs, versions and asset IDs.
+- **Density:** prefer a compact, readable operations view. Avoid oversized hero graphics, gradients, decorative charts and multiple competing accent colors.
+- **Responsive behavior:** desktop-first, usable at 768 px. At narrow widths, sidebar becomes a menu, metric cards become a 2-column grid, and tables collapse into rows with priority, advisory, service and status visible first.
+- **Color is never the only signal:** every severity, health or outcome color is paired with a text label and, where useful, an icon.
 
 ## 4. Screen requirements
 
@@ -61,18 +81,25 @@ Inventory, policy, evaluation, notifications history and audit can begin as read
 **Question answered:** Is the fleet working, and how many items need attention?
 
 ```text
-Counterstrike     LOCAL DEMO                 Latest run: Completed · 10:15
-Overview | Alerts | Needs review | Run status
+Overview  /  Vulnerability exposure
+Monitor new findings, review decisions and the latest fleet run.
 
-Needs action     Open alerts     Needs review     Feed status
-      3               8                2          2 healthy / 1 failed
+┌ 3 Needs action ┐ ┌ 8 Open alerts ┐ ┌ 2 Needs review ┐ ┌ 2/3 Feeds healthy ┐
+│ 1 priority P1  │ │ 1 priority P1 │ │ Oldest: 2 h    │ │ OSV last failed  │
+└────────────────┘ └───────────────┘ └────────────────┘ └──────────────────┘
 
-Alerts by priority                 Latest activity
-P1  1   P2  3   P3  3   P4  1     10:15  Run completed
-                                  10:14  8 alerts written
-                                  10:12  2 items sent to review
+┌ Open alerts by priority ─────────────────┐ ┌ Latest run ───────────────────┐
+│ P1  █ 1                                  │ │ Completed · 10:15             │
+│ P2  ███ 3                               │ │ 8 ingested · 5 matched · 8     │
+│ P3  ███ 3                               │ │ alerts · 2 items need review  │
+│ P4  █ 1                                  │ │ [View run details]             │
+│ [View all alerts]                        │ └───────────────────────────────┘
+└──────────────────────────────────────────┘
 
-[View P1/P2 alerts]               [Open run status]
+┌ Highest priority alerts ────────────────────────────────────────────────────┐
+│ P1  CVE-…  log4j-core  payments-api  team-payments  Affected  [Open →]       │
+│ P2  CVE-…  openssl     client-portal team-digital   Affected  [Open →]       │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Rules**
@@ -81,12 +108,28 @@ P1  1   P2  3   P3  3   P4  1     10:15  Run completed
 - Show only counts that can be calculated from the current data. If acknowledgement, SLA aging or delivery status is not stored, omit those metrics instead of estimating them.
 - Display “No run yet” and “No alerts in this run” as distinct empty states.
 - For the file-based MVP, counts are derived from the latest `run_report.json`, `alerts.json` and `needs_human.json`.
+- Layout: four equal metric cards across the top; below, a two-thirds/one-third split for priority distribution and latest run; a full-width priority alert table follows. Cards use white backgrounds, a thin cool-gray border and a small colored icon/accent, not a full saturated fill.
+- Priority distribution uses labeled horizontal bars. It is a navigation aid, not a substitute for exact counts or the alert list.
 
 ### 4.2 Alerts list and detail
 
 **Question answered:** Which assets are affected, what is the priority, and what evidence supports the action?
 
 List columns: Priority · CVE/advisory ID · Product · Service/asset · Installed version · Owner · Status. Default sort is priority, then risk score descending. Filters: priority, owner, product, and status. Search matches advisory ID, product, asset ID and service. Keep filters in the URL or provide a visible **Clear filters** action.
+
+Page layout: title and result count at top; one filter/search row beneath; priority summary chips; then a full-width table. Use a sticky table header and subtle row dividers. Selecting a row opens a 440 px right-side detail drawer on wide screens; on smaller screens the detail becomes its own page. Do not make an entire dense table row the only keyboard-accessible control.
+
+```text
+Alerts  /  8 findings
+[Search CVE, product, service…] [Priority ▾] [Owner ▾] [Status ▾] [Clear]
+[All 8] [P1 1] [P2 3] [P3 3] [P4 1]
+┌────┬─────────────┬───────────┬───────────────┬───────────┬──────────────┐
+│Pri │ Advisory    │ Product   │ Service       │ Version   │ Owner        │
+├────┼─────────────┼───────────┼───────────────┼───────────┼──────────────┤
+│ P1 │ CVE-…       │ log4j-core│ payments-api  │ 2.14.1    │ team-payments│
+│ P2 │ CVE-…       │ openssl   │ client-portal │ 3.0.6     │ team-digital │
+└────┴─────────────┴───────────┴───────────────┴───────────┴──────────────┘
+```
 
 Selecting a row opens an inline side panel (or a detail route) with sections in this order:
 
@@ -97,6 +140,8 @@ Selecting a row opens an inline side panel (or a detail route) with sections in 
 5. **Evidence and sources:** affected range, inventory evidence, advisory source/reference links, and any version parsing note.
 6. **Activity:** show only events that are actually recorded. Do not invent an acknowledgement or delivery timeline.
 
+Drawer visual hierarchy: top strip contains a compact priority badge, advisory ID and close button; the affected service and component form the main heading; an amber/blue “Affected” state sits beside it. Place the score and SLA in a light-blue summary panel. Use clear section headers and divider spacing rather than nested tabs. Source links appear as ordinary underlined links with a small external-link icon.
+
 Available prototype actions: **Open source**, **Copy alert link** (when a stable route exists), and **Mark reviewed** only after a persisted review/status model is implemented. Do not expose “Acknowledge,” “Resolve,” “Retry delivery,” or “Create ticket” as working buttons until their backend behavior exists. A disabled button is less useful than a clear status note.
 
 ### 4.3 Needs review
@@ -104,6 +149,8 @@ Available prototype actions: **Open source**, **Copy alert link** (when a stable
 **Question answered:** What did the system decline to decide, and what information does an analyst need?
 
 Each row shows advisory ID, review reason, known product (if any), affected asset (if any), created/run time and review status. Group duplicate review reasons for the same advisory while retaining the underlying evidence. Default sort is oldest first, with any provisional high-risk case pinned only if a deterministic score exists.
+
+Use a two-column workbench: a 35% review list on the left and the selected item's evidence on the right. The selected row has a pale blue background and a blue edge. Show review reason in amber text on a pale amber background, not as a red severity badge. With no selected item, show a short prompt to choose an item; with no open items, show “No advisories need review.”
 
 The detail view shows the raw bulletin as inert text, model output if present, grounding/validation reason, possible inventory candidates and source references. It must not render advisory HTML. The UI must not present a raw model suggestion as a confirmed fact.
 
@@ -116,11 +163,15 @@ The detail view shows the raw bulletin as inert text, model output if present, g
 
 Until the review record and audit event are persisted, use a read-only review view and demonstrate dispositions with a clearly marked fixture. Never make a UI-only decision that disappears on refresh.
 
+When decisions are enabled, show the rationale text area directly below the evidence and keep the decision buttons together at the bottom of the panel. **Confirm affected** is the primary blue action; **Not affected** and **Need more information** are secondary outline actions. Require confirmation before closing an item. Do not use a destructive red button for an ordinary “Not affected” decision.
+
 ### 4.4 Run status
 
 **Question answered:** What ran, what failed, and can the operator trust this result?
 
 Show one row per enabled feed when feed polling is implemented: source, status, last attempt, last success, new/updated/duplicate counts and concise error. Before that exists, label local input files as **Fixture inputs**; do not show scheduled poll times or pretend the local JSON files are live feeds.
+
+Arrange the page in three stacked regions: (1) a run summary banner with status, start/end time and trigger; (2) source/feed cards or table; (3) a horizontal pipeline stepper with one segment per agent and expandable details. Failed/degraded components use an amber or red outline and include a short explanation plus the last successful time. Keep raw trace JSON behind a **View details** disclosure.
 
 Show the latest pipeline trace using actual `run_report.json` entries: agent, counts and duration. Add warnings for missing output files, failed nodes or incomplete runs. Link to `alerts.json`, `needs_human.json`, `run_report.json` and `scorecard.md` when present.
 
@@ -218,13 +269,54 @@ Do not block the backend work to create mock pages for all proposed future scree
 
 ## 9. Visual and accessibility rules
 
-- Use a neutral light background, clear typography and restrained color. Use red/orange/amber/green only as secondary status cues; always include text labels.
-- Keep CVE IDs, versions, ranges and asset IDs in a monospaced style. Avoid wide tables; on narrow screens show priority, advisory, service and status first.
-- Put the risk explanation, recommendation and evidence on the first detail view without requiring several nested tabs.
-- Use a visible focus state, semantic headings, labeled inputs and buttons, keyboard-accessible navigation, and accessible contrast (WCAG AA target).
+### 9.1 Professional color palette
+
+Use a cool, trustworthy enterprise palette: deep navy for the application frame, clear blue for primary actions and links, teal for supporting accents, and soft cool grays for page surfaces. Reserve red, orange and amber for priority or operational status. The overall page should remain mostly light and calm; saturated colors belong on small badges, icons and thin accents rather than large panels.
+
+| Token | Hex | Use |
+|---|---|---|
+| `navy-900` | `#172B4D` | Sidebar and top-bar background; white text/icons |
+| `blue-700` | `#1D4ED8` | Primary buttons, selected navigation edge, links, keyboard focus |
+| `blue-050` | `#EFF6FF` | Selected row, selected navigation background, info panel |
+| `teal-700` | `#0F766E` | Secondary accent, inventory/source icon; not used to signal severity |
+| `page-bg` | `#F4F7FB` | Overall workspace background |
+| `surface` | `#FFFFFF` | Cards, drawers and table surface |
+| `border` | `#D9E2EC` | Card edges, separators and table rules |
+| `text-primary` | `#172B4D` | Main text |
+| `text-secondary` | `#52657A` | Supporting labels and metadata |
+| `p1` | `#B42318` | P1 badge and urgent state; pair with pale red `#FEE4E2` |
+| `p2` | `#C2410C` | P2 badge; pair with pale orange `#FFEDD5` |
+| `p3` | `#A16207` | P3 badge; pair with pale amber `#FEF3C7` |
+| `p4` | `#475569` | P4 badge; pair with pale slate `#E2E8F0` |
+| `success` | `#15803D` | Healthy / completed state; pair with pale green `#DCFCE7` |
+| `warning` | `#A16207` | Degraded / needs attention; pair with pale amber `#FEF3C7` |
+| `error` | `#B42318` | Failed state; pair with pale red `#FEE4E2` |
+
+**Usage rules:**
+
+- Sidebar and top bar use navy with white text. Active navigation uses `blue-050`, `blue-700` text and a narrow `blue-700` edge.
+- Primary buttons use `blue-700` with white text. Secondary buttons use a white background, `border` outline and navy text. Links use `blue-700` and remain underlined on hover/focus.
+- P1–P4 badges use the matching dark foreground on a pale tinted background; use bold text such as `P1 · Critical`. Do not use white-on-saturated red/orange for small text.
+- Affected uses a pale red/rose treatment only when it represents an actual confirmed finding. Possibly affected / Needs review uses amber. Not affected uses pale green. Informational metadata uses blue or slate.
+- Healthy, degraded and failed feed states pair a colored dot with the word **Healthy**, **Degraded** or **Failed**. Keep the dot at least 8 px and never rely on it alone.
+- Keep card backgrounds white, with 1 px borders and subtle shadows only on floating elements such as the detail drawer. Avoid gradients and color-filled metric cards.
+
+### 9.2 Layout, typography and components
+
+- Use an 8 px spacing scale: 8 px within compact controls, 16 px between related elements, 24 px between sections, and 32 px page padding.
+- Cards have 8 px corner radius; the side drawer has a subtle shadow and a fixed width near 440 px. Buttons and inputs are at least 40 px high.
+- KPI cards show a small label, a large count and one supporting fact. Use a thin 3 px top accent or colored icon rather than a large colored background.
+- Tables use 48 px rows, 12–14 px text, a pale slate header row and light horizontal separators. Highlight hover with `#F8FAFC`; selected row uses `blue-050`.
+- Priority badges, outcome labels and AI-summary labels have distinct shapes and text. Do not make the AI label look like severity.
+- Keep CVE IDs, version numbers/ranges and asset IDs in monospace. Truncate long text with a visible title/expand action; never truncate the recommendation or source URL without a way to inspect it.
+
+### 9.3 Accessibility and page states
+
+- Target WCAG AA contrast for text and controls. Pair every color-coded state with text and use visible keyboard focus (`2 px` blue outline with offset).
+- Use semantic headings, table headers, labeled form controls and keyboard-operable navigation. Dialog/drawer focus behavior is required only when those interactive patterns are implemented.
 - Render feed text as plain text to prevent markup/script execution. Escape user-provided owner, service and product strings.
-- Provide loading, empty, stale, partial failure and error states. Errors should say what failed and how to recover, without exposing tokens or internal exception traces.
-- Avoid decorative charts when the underlying sample size is small; show the number and a plain-language explanation instead.
+- Provide loading, empty, stale, partial-failure and error states. Errors explain what failed and what to do next without exposing tokens or raw internal exceptions.
+- Avoid decorative charts when the sample is small; use labeled counts and a plain-language explanation instead.
 
 ## 10. Acceptance checks for the UI
 
