@@ -2085,7 +2085,7 @@ def create_app(settings=None):
                 "outcome": historical_match.outcome,
                 "asset_key": historical_asset.asset_key,
                 "component": historical_asset.component,
-                "installed_version": historical_asset.installed_version,
+                "installed_version": historical_asset.version,
                 "confidence": historical_match.confidence,
                 "affected_range": historical_match.affected_range,
                 "comparator": historical_match.comparator,
