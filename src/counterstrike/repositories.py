@@ -337,10 +337,17 @@ def persist_run_results(
             service=asset.service,
             component=asset.component,
             version=asset.version,
+            vendor=asset.vendor,
             owner=asset.owner,
+            owner_contact=asset.owner_contact,
             criticality=str(criticality),
             internet_facing=asset.internet_facing,
-            extra_context={},
+            data_classification=asset.data_classification,
+            extra_context={
+                "product": asset.inventory_product,
+                "asset_type": asset.asset_type,
+                "aliases": asset.aliases,
+            },
         )
         session.add(row)
         assets_by_key[asset.asset_id] = row

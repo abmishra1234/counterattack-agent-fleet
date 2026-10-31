@@ -7,7 +7,8 @@ import time
 from pathlib import Path
 
 from counterstrike.config import Settings, load_settings
-from counterstrike.models import Advisory, Asset, FleetState
+from counterstrike.inventory import load_inventory_document
+from counterstrike.models import Advisory, FleetState
 from counterstrike.sources import FixtureFeedAdapter, fetch_public_feed_bundle
 
 
@@ -57,8 +58,16 @@ def ingest_agent(
                 "advisories": len(advisories),
             }
         )
-    inventory = [Asset.model_validate(a) for a in _load(data / "inventory.json")]
+    inventory = load_inventory_document(data / "inventory.json").assets
     aliases = {k.lower(): v.lower() for k, v in _load(data / "aliases.json").items()}
+    for asset in inventory:
+        canonical_product = asset.inventory_product.casefold()
+        for alias in asset.aliases:
+            normalized_alias = alias.casefold()
+            existing = aliases.get(normalized_alias)
+            if existing is not None and existing != canonical_product:
+                raise ValueError("inventory alias conflicts with configured product aliases")
+            aliases[normalized_alias] = canonical_product
     unique: list[Advisory] = []
     seen: set[str] = set()
     for adv in advisories:  # feeds repeat items; keep the first copy of each CVE id

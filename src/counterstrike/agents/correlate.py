@@ -69,7 +69,7 @@ def correlate_agent(state: FleetState) -> dict:
                 matching_assets = [
                     asset
                     for asset in state["inventory"]
-                    if asset.component.lower() == prod.product
+                    if asset.inventory_product.casefold() == prod.product
                 ]
                 if not matching_assets:
                     add_review(
@@ -91,8 +91,8 @@ def correlate_agent(state: FleetState) -> dict:
                             comparator=None,
                             evidence=[
                                 (
-                                    f"asset component '{asset.component}' matches product "
-                                    f"'{prod.product}'"
+                                    f"inventory product '{asset.inventory_product}' (component "
+                                    f"'{asset.component}') matches advisory product '{prod.product}'"
                                 ),
                                 f"affected range '{prod.affected[:200]}' is invalid",
                                 *(str(item)[:500] for item in adv.evidence[:5]),
@@ -102,7 +102,7 @@ def correlate_agent(state: FleetState) -> dict:
                     )
                 continue
             for asset in state["inventory"]:
-                if asset.component.lower() != prod.product:
+                if asset.inventory_product.casefold() != prod.product:
                     continue
                 version, note = tolerant_version(asset.version)
                 if version is None:
@@ -119,8 +119,8 @@ def correlate_agent(state: FleetState) -> dict:
                             comparator=None,
                             evidence=[
                                 (
-                                    f"asset component '{asset.component}' matches product "
-                                    f"'{prod.product}'"
+                                    f"inventory product '{asset.inventory_product}' (component "
+                                    f"'{asset.component}') matches advisory product '{prod.product}'"
                                 ),
                                 (
                                     f"installed version '{asset.version[:120]}' cannot be "
@@ -137,8 +137,8 @@ def correlate_agent(state: FleetState) -> dict:
                 outcome = "possible_match" if note else "affected" if affected else "not_affected"
                 evidence = [
                     (
-                        f"asset component '{asset.component}' matches advisory product "
-                        f"'{prod.product}'"
+                        f"inventory product '{asset.inventory_product}' (component "
+                        f"'{asset.component}') matches advisory product '{prod.product}'"
                     ),
                     (
                         f"installed version '{asset.version}' satisfies affected range "

@@ -5,7 +5,7 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Any, Literal, TypedDict
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Priority = Literal["P1", "P2", "P3", "P4"]
 Criticality = Literal["critical", "high", "medium", "low"]
@@ -44,6 +44,8 @@ class ExtractedAdvisory(BaseModel):
 
 
 class Asset(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     asset_id: str = Field(min_length=1, max_length=128)
     service: str = Field(min_length=1, max_length=200)
     component: str = Field(min_length=1, max_length=200)
@@ -51,11 +53,42 @@ class Asset(BaseModel):
     internet_facing: bool
     criticality: Criticality
     owner: str = Field(min_length=1, max_length=200)
+    owner_contact: str | None = Field(default=None, max_length=254)
     vendor: str | None = Field(default=None, max_length=200)
     product: str | None = Field(default=None, max_length=200)
     asset_type: Literal["application", "service", "vendor_product", "saas"] = "application"
     data_classification: Literal["public", "internal", "confidential", "restricted"] | None = None
     aliases: list[str] = Field(default_factory=list, max_length=32)
+
+    @field_validator("asset_id", "service", "component", "version", "owner")
+    @classmethod
+    def trim_required_inventory_values(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("inventory values must not be empty")
+        return cleaned
+
+    @field_validator("vendor", "product")
+    @classmethod
+    def trim_optional_inventory_values(cls, value: str | None) -> str | None:
+        cleaned = value.strip() if value else None
+        return cleaned or None
+
+    @field_validator("owner_contact")
+    @classmethod
+    def trim_owner_contact(cls, value: str | None) -> str | None:
+        cleaned = value.strip() if value else None
+        return cleaned or None
+
+    @field_validator("aliases")
+    @classmethod
+    def normalize_asset_aliases(cls, values: list[str]) -> list[str]:
+        aliases = [value.strip() for value in values]
+        if any(not alias for alias in aliases):
+            raise ValueError("inventory aliases must not be empty")
+        if len({alias.casefold() for alias in aliases}) != len(aliases):
+            raise ValueError("inventory aliases must be unique per asset")
+        return aliases
 
     @property
     def inventory_product(self) -> str:
@@ -64,6 +97,8 @@ class Asset(BaseModel):
 
 class InventoryDocument(BaseModel):
     """Versioned inventory file contract; product-level data stays local to matching."""
+
+    model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal["1.0"]
     assets: list[Asset] = Field(min_length=1, max_length=10_000)

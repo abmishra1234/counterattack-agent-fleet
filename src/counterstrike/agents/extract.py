@@ -39,7 +39,7 @@ def _normalise(name: str, aliases: dict[str, str]) -> str:
 def extract_agent(state: FleetState, llm: LLMPort) -> dict:
     t0 = time.perf_counter()
     aliases = state["aliases"]
-    components = {a.component.lower() for a in state["inventory"]}
+    components = {a.inventory_product.casefold() for a in state["inventory"]}
     vocabulary = sorted(components | set(aliases))
     kev = set(state["kev"])
     extracted: list[ExtractedAdvisory] = []

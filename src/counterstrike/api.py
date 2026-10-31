@@ -43,6 +43,7 @@ from counterstrike.db_models import (
     Source,
     SourceCheckpoint,
 )
+from counterstrike.inventory import load_inventory_document
 from counterstrike.metrics import HTTPMetrics
 from counterstrike.observability import configure_logging, request_id_context
 from counterstrike.repositories import create_run
@@ -229,6 +230,31 @@ class SourceItem(BaseModel):
 
 class SourceListResponse(BaseModel):
     items: list[SourceItem]
+
+
+class InventoryItem(BaseModel):
+    asset_key: str
+    asset_type: str | None = None
+    service: str
+    vendor: str | None = None
+    product: str | None = None
+    component: str
+    version: str
+    owner: str
+    owner_contact: str | None = None
+    criticality: str
+    internet_facing: bool
+    data_classification: str | None = None
+    aliases: list[str] = Field(default_factory=list)
+
+
+class InventoryResponse(BaseModel):
+    items: list[InventoryItem]
+    total: int
+    limit: int
+    offset: int
+    mode: Literal["persisted_snapshot", "local_fixture"]
+    snapshot_id: str | None
 
 
 class AuditEventItem(BaseModel):
@@ -440,10 +466,14 @@ class AlertAdvisoryContext(BaseModel):
 
 class AlertAssetContext(BaseModel):
     asset_key: str | None = None
+    asset_type: str | None = None
     criticality: str | None = None
     internet_facing: bool | None = None
     data_classification: str | None = None
     vendor: str | None = None
+    product: str | None = None
+    owner_contact: str | None = None
+    aliases: list[str] = Field(default_factory=list)
 
 
 class AlertScoreBreakdown(BaseModel):
@@ -654,7 +684,10 @@ def _preview_payload(settings):
             "needsHuman": _read_json(settings.out_dir / "needs_human.json"),
             "report": _read_json(report_path),
             "advisories": _read_json(settings.data_dir / "advisories.json"),
-            "inventory": _read_json(settings.data_dir / "inventory.json"),
+            "inventory": [
+                asset.model_dump(mode="json")
+                for asset in load_inventory_document(settings.data_dir / "inventory.json").assets
+            ],
             "kev": _read_json(settings.data_dir / "kev.json"),
             "lastRun": datetime.fromtimestamp(report_stat.st_mtime, timezone.utc).isoformat(),
         }
@@ -662,7 +695,7 @@ def _preview_payload(settings):
         raise RuntimeError(
             "Local preview data is not ready. Run the Counterstrike CLI first."
         ) from exc
-    except (json.JSONDecodeError, OSError) as exc:
+    except (ValueError, OSError) as exc:
         raise RuntimeError(
             "Local preview data could not be read. Check the input and output files."
         ) from exc
@@ -734,7 +767,12 @@ def create_app(settings=None):
             return "read"
         if path == "/api/data":
             return "read" if method == "GET" else "unmapped"
-        if path in {"/api/v1/dashboard", "/api/v1/sources", "/api/v1/alerts"} or re.fullmatch(
+        if path in {
+            "/api/v1/dashboard",
+            "/api/v1/sources",
+            "/api/v1/alerts",
+            "/api/v1/inventory",
+        } or re.fullmatch(
             r"/api/v1/alerts/[^/]+", path
         ):
             return "read" if method == "GET" else "unmapped"
@@ -1498,6 +1536,131 @@ def create_app(settings=None):
             ]
         }
 
+    @app.get("/api/v1/inventory", response_model=InventoryResponse, tags=["inventory"])
+    def list_inventory(
+        limit: int = Query(default=50, ge=1, le=200),
+        offset: int = Query(default=0, ge=0, le=1_000_000),
+        search: str | None = Query(default=None, max_length=200),
+        criticality: Literal["critical", "high", "medium", "low"] | None = Query(default=None),
+        internet_facing: bool | None = Query(default=None),
+        session=Depends(db_session),
+    ):
+        if settings.database_url is None:
+            assets = load_inventory_document(settings.data_dir / "inventory.json").assets
+            filtered = [
+                asset
+                for asset in assets
+                if (criticality is None or asset.criticality == criticality)
+                and (internet_facing is None or asset.internet_facing == internet_facing)
+                and (
+                    not search
+                    or search.casefold()
+                    in " ".join(
+                        (
+                            asset.asset_id,
+                            asset.service,
+                            asset.vendor or "",
+                            asset.inventory_product,
+                            asset.component,
+                            asset.version,
+                            asset.owner,
+                        )
+                    ).casefold()
+                )
+            ]
+            return {
+                "items": [
+                    {
+                        "asset_key": asset.asset_id,
+                        "asset_type": asset.asset_type,
+                        "service": asset.service,
+                        "vendor": asset.vendor,
+                        "product": asset.inventory_product,
+                        "component": asset.component,
+                        "version": asset.version,
+                        "owner": asset.owner,
+                        "owner_contact": asset.owner_contact,
+                        "criticality": asset.criticality,
+                        "internet_facing": asset.internet_facing,
+                        "data_classification": asset.data_classification,
+                        "aliases": asset.aliases,
+                    }
+                    for asset in filtered[offset : offset + limit]
+                ],
+                "total": len(filtered),
+                "limit": limit,
+                "offset": offset,
+                "mode": "local_fixture",
+                "snapshot_id": None,
+            }
+
+        snapshot_id = session.scalar(
+            select(RunRecord.inventory_snapshot_id)
+            .where(RunRecord.inventory_snapshot_id.is_not(None))
+            .order_by(RunRecord.created_at.desc(), RunRecord.id.desc())
+            .limit(1)
+        )
+        if snapshot_id is None:
+            return {
+                "items": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "mode": "persisted_snapshot",
+                "snapshot_id": None,
+            }
+        statement = select(InventoryAsset).where(InventoryAsset.snapshot_id == snapshot_id)
+        if criticality is not None:
+            statement = statement.where(InventoryAsset.criticality == criticality)
+        if internet_facing is not None:
+            statement = statement.where(InventoryAsset.internet_facing.is_(internet_facing))
+        if search:
+            pattern = f"%{search}%"
+            statement = statement.where(
+                or_(
+                    InventoryAsset.asset_key.ilike(pattern),
+                    InventoryAsset.service.ilike(pattern),
+                    InventoryAsset.vendor.ilike(pattern),
+                    InventoryAsset.component.ilike(pattern),
+                    InventoryAsset.version.ilike(pattern),
+                    InventoryAsset.owner.ilike(pattern),
+                )
+            )
+        total = session.scalar(select(func.count()).select_from(statement.subquery())) or 0
+        rows = session.scalars(
+            statement.order_by(InventoryAsset.asset_key)
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        items = []
+        for asset in rows:
+            context = asset.extra_context or {}
+            items.append(
+                {
+                    "asset_key": asset.asset_key,
+                    "asset_type": context.get("asset_type"),
+                    "service": asset.service,
+                    "vendor": asset.vendor,
+                    "product": context.get("product", asset.component),
+                    "component": asset.component,
+                    "version": asset.version,
+                    "owner": asset.owner,
+                    "owner_contact": asset.owner_contact,
+                    "criticality": asset.criticality,
+                    "internet_facing": asset.internet_facing,
+                    "data_classification": asset.data_classification,
+                    "aliases": context.get("aliases", []),
+                }
+            )
+        return {
+            "items": items,
+            "total": int(total),
+            "limit": limit,
+            "offset": offset,
+            "mode": "persisted_snapshot",
+            "snapshot_id": str(snapshot_id),
+        }
+
     @app.get("/api/v1/audit/events", response_model=AuditEventListResponse, tags=["audit"])
     def list_audit_events(
         since: datetime | None = Query(default=None),
@@ -1729,10 +1892,14 @@ def create_app(settings=None):
         asset_context = (
             {
                 "asset_key": asset.asset_key,
+                "asset_type": (asset.extra_context or {}).get("asset_type"),
                 "criticality": asset.criticality,
                 "internet_facing": asset.internet_facing,
                 "data_classification": asset.data_classification,
                 "vendor": asset.vendor,
+                "product": (asset.extra_context or {}).get("product", asset.component),
+                "owner_contact": asset.owner_contact,
+                "aliases": (asset.extra_context or {}).get("aliases", []),
             }
             if asset
             else {}

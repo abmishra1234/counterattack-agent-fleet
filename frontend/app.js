@@ -10,6 +10,10 @@ let ownerFilter = 'all';
 let usageOffset = 0;
 let usageReportOffset = 0;
 let usageLoadSequence = 0;
+let inventoryOffset = 0;
+let inventorySearch = '';
+let inventoryCriticality = '';
+let inventoryRequestSequence = 0;
 
 const escapeHtml = (value = '') => String(value).replace(/[&<>"']/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -137,8 +141,9 @@ async function loadData() {
 function render() {
   document.querySelectorAll('.nav-item').forEach((item) => item.classList.toggle('active', item.dataset.page === activePage));
   const crumb = document.querySelector('#crumb-page');
-  if (crumb) crumb.textContent = ({ overview: 'Today', alerts: 'Alerts', review: 'Needs review', health: 'Run health', usage: 'LLM usage' })[activePage] || 'Today';
+  if (crumb) crumb.textContent = ({ overview: 'Today', inventory: 'Inventory', alerts: 'Alerts', review: 'Needs review', health: 'Run health', usage: 'LLM usage' })[activePage] || 'Today';
   if (activePage === 'alerts') renderAlerts();
+  else if (activePage === 'inventory') renderInventory();
   else if (activePage === 'review') renderReview();
   else if (activePage === 'health') renderHealth();
   else if (activePage === 'usage' && model.capabilities.includes('usage')) renderUsage();
@@ -282,6 +287,57 @@ function renderAlerts() {
   document.querySelector('#clear-filters').addEventListener('click', () => { priorityFilter = 'All'; query = ''; ownerFilter = 'all'; renderAlerts(); });
   document.querySelector('#owner-filter').addEventListener('change', (event) => { ownerFilter = event.target.value; updateAlertsTable(); });
   bindAlertRows();
+}
+
+async function renderInventory() {
+  const requestSequence = ++inventoryRequestSequence;
+  const params = new URLSearchParams({ limit: '50', offset: String(inventoryOffset) });
+  if (inventorySearch.trim()) params.set('search', inventorySearch.trim());
+  if (inventoryCriticality) params.set('criticality', inventoryCriticality);
+  app.innerHTML = `${pageHeading('WORKSPACE / INVENTORY', 'Fleet inventory', 'Review the versioned inventory snapshot used for vulnerability correlation.')}<article class="panel table-panel"><div class="panel-header"><div class="panel-title">Loading inventory…</div></div></article>`;
+  try {
+    const result = await apiGet(`/api/v1/inventory?${params.toString()}`);
+    if (requestSequence !== inventoryRequestSequence || activePage !== 'inventory') return;
+    const items = result.items || [];
+    const first = result.total ? result.offset + 1 : 0;
+    const last = result.offset + items.length;
+    const rows = items.length ? items.map((item) => `<tr>
+      <td><div class="asset-cell"><span class="service-name">${escapeHtml(item.asset_key)}</span><small>${escapeHtml(friendlyName(item.asset_type || 'application'))}</small></div></td>
+      <td><div class="asset-cell"><span class="service-name">${escapeHtml(item.service)}</span><small>${escapeHtml(item.vendor || 'Vendor not set')}</small></div></td>
+      <td><div class="asset-cell"><span class="service-name">${escapeHtml(item.product || item.component)}</span><small>${escapeHtml(item.component)} · ${escapeHtml(item.version)}</small></div></td>
+      <td><div class="owner-cell"><span class="owner-avatar">${escapeHtml((item.owner || '??').slice(0, 2).toUpperCase())}</span><span class="owner-name">${escapeHtml(item.owner)}${item.owner_contact ? `<small>${escapeHtml(item.owner_contact)}</small>` : ''}</span></div></td>
+      <td>${escapeHtml(friendlyName(item.criticality))}</td><td>${item.internet_facing ? 'Internet-facing' : 'Internal'}</td>
+      <td>${escapeHtml(friendlyName(item.data_classification || 'not classified'))}</td>
+    </tr>`).join('') : '<tr><td colspan="7"><div class="no-results">No inventory assets match these filters.</div></td></tr>';
+    app.innerHTML = `${pageHeading('WORKSPACE / INVENTORY', 'Fleet inventory', 'Review the versioned inventory snapshot used for vulnerability correlation.')}
+      <div class="page-toolbar"><label class="searchbox"><span aria-hidden="true">⌕</span><input id="inventory-search" type="search" placeholder="Search asset, product, service, vendor or owner" value="${escapeHtml(inventorySearch)}" aria-label="Search inventory"></label><select class="select-control" id="inventory-criticality" aria-label="Filter by criticality"><option value="">All criticalities</option>${['critical', 'high', 'medium', 'low'].map((value) => `<option value="${value}" ${inventoryCriticality === value ? 'selected' : ''}>${friendlyName(value)}</option>`).join('')}</select><span class="feed-mode">${result.mode === 'persisted_snapshot' ? 'PERSISTED SNAPSHOT' : 'LOCAL FIXTURE'}</span></div>
+      <article class="panel table-panel"><div class="panel-header"><div><div class="panel-title">Inventory assets</div><div class="panel-subtitle">${result.snapshot_id ? `Snapshot ${escapeHtml(result.snapshot_id)}` : 'Current local inventory contract'}</div></div><span class="table-caption">${result.total} total</span></div>
+      <div class="table-wrap"><table><thead><tr><th>Asset</th><th>Service / vendor</th><th>Product / installed component</th><th>Owner / contact</th><th>Criticality</th><th>Exposure</th><th>Data classification</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="table-foot"><span>Showing ${first}–${last} of ${result.total} · ${escapeHtml(result.mode === 'persisted_snapshot' ? 'Persisted run snapshot' : 'Validated local fixture')}</span><div class="heading-actions"><button class="button small" id="inventory-prev" type="button" ${result.offset <= 0 ? 'disabled' : ''}>Previous</button><button class="button small" id="inventory-next" type="button" ${result.offset + items.length >= result.total ? 'disabled' : ''}>Next</button></div></div></article>`;
+    document.querySelector('#inventory-search').addEventListener('input', (event) => {
+      inventorySearch = event.currentTarget.value;
+      inventoryOffset = 0;
+      window.clearTimeout(renderInventory.searchTimer);
+      renderInventory.searchTimer = window.setTimeout(renderInventory, 180);
+    });
+    document.querySelector('#inventory-criticality').addEventListener('change', (event) => {
+      inventoryCriticality = event.currentTarget.value;
+      inventoryOffset = 0;
+      renderInventory();
+    });
+    document.querySelector('#inventory-prev').addEventListener('click', () => {
+      inventoryOffset = Math.max(0, inventoryOffset - 50);
+      renderInventory();
+    });
+    document.querySelector('#inventory-next').addEventListener('click', () => {
+      inventoryOffset += 50;
+      renderInventory();
+    });
+  } catch (error) {
+    if (requestSequence !== inventoryRequestSequence || activePage !== 'inventory') return;
+    app.innerHTML = `${pageHeading('WORKSPACE / INVENTORY', 'Fleet inventory', 'Review the versioned inventory snapshot used for vulnerability correlation.')}<section class="error-state"><div><div class="empty-icon">!</div><strong>Could not load inventory</strong><p>${escapeHtml(error.message)}</p><button class="button" id="retry-inventory" type="button">Retry</button></div></section>`;
+    document.querySelector('#retry-inventory').addEventListener('click', renderInventory);
+  }
 }
 
 function updateAlertsTable() {
@@ -586,7 +642,7 @@ async function openAlert(alertId) {
     };
     drawerRoot.innerHTML = `<div class="drawer-backdrop" data-close-drawer></div><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title"><div class="drawer-head"><div class="drawer-kicker"><span>ALERT DETAIL - ${escapeHtml(alert.alert_id)}</span><button class="icon-button" type="button" aria-label="Close alert details" data-close-drawer>&times;</button></div><h2 class="drawer-title" id="drawer-title">${escapeHtml(advisory.title || alert.cve_id)}</h2><div class="drawer-subtitle mono">${escapeHtml(alert.cve_id)} - ${escapeHtml(sourceLabel(advisory))}</div></div><div class="drawer-body">
       <div class="drawer-status-row">${priorityBadge(alert.priority)}${statusBadge('Affected')}<span class="tag">SLA ${alert.sla_hours} h</span>${isKev ? '<span class="tag kev-tag">KEV-listed</span>' : ''}</div>
-      <section class="drawer-block"><h3>Affected service</h3><div class="asset-box"><strong>${escapeHtml(alert.service)}</strong><p>${escapeHtml(alert.component)} ${escapeHtml(alert.installed_version)} -&gt; fix ${escapeHtml(alert.fixed_version || 'not published')}</p><div class="asset-meta"><span>Asset <strong class="mono">${escapeHtml(alert.asset_id)}</strong></span><span>Owner <strong>${escapeHtml(alert.owner)}</strong></span><span>${asset.internet_facing ? 'Internet-facing' : 'Internal'}</span><span>${escapeHtml(criticality)} criticality</span></div></div></section>
+      <section class="drawer-block"><h3>Affected service</h3><div class="asset-box"><strong>${escapeHtml(alert.service)}</strong><p>${escapeHtml(alert.component)} ${escapeHtml(alert.installed_version)} -&gt; fix ${escapeHtml(alert.fixed_version || 'not published')}</p><div class="asset-meta"><span>Asset <strong class="mono">${escapeHtml(alert.asset_id)}</strong></span><span>Owner <strong>${escapeHtml(alert.owner)}</strong></span>${asset.owner_contact ? `<span>Contact <strong>${escapeHtml(asset.owner_contact)}</strong></span>` : ''}<span>${asset.internet_facing ? 'Internet-facing' : 'Internal'}</span><span>${escapeHtml(criticality)} criticality</span>${asset.asset_type ? `<span>Type <strong>${escapeHtml(friendlyName(asset.asset_type))}</strong></span>` : ''}${asset.product ? `<span>Product <strong>${escapeHtml(asset.product)}</strong></span>` : ''}${asset.vendor ? `<span>Vendor <strong>${escapeHtml(asset.vendor)}</strong></span>` : ''}${asset.data_classification ? `<span>Data <strong>${escapeHtml(friendlyName(asset.data_classification))}</strong></span>` : ''}</div></div></section>
       <section class="drawer-block"><h3>Why this priority <span class="mono-label">Policy ${escapeHtml(detail.policy_version || 'unknown')}</span></h3><div class="score-box"><div class="score-top"><span>Risk score</span><strong>${Number(alert.risk_score).toFixed(1)}</strong></div><div class="score-factors">${Object.entries(breakdown).map(([name, value]) => `<div class="factor-row"><span>${escapeHtml(name)}</span><strong>${typeof value === 'number' ? value.toFixed(1) : escapeHtml(value)}</strong></div>`).join('')}</div></div></section>
       <section class="drawer-block"><h3>Recommended action</h3><div class="fix-box"><strong>Recommended remediation</strong><p>${escapeHtml(alert.remediation)}</p><span class="mono-label">${escapeHtml(citationStatusLabel)}</span></div></section>
       <section class="drawer-block"><h3>Remediation evidence</h3>${remediationCitationsHtml}</section>
@@ -640,7 +696,7 @@ document.querySelector('#global-search').addEventListener('input', (event) => {
 window.addEventListener('hashchange', () => {
   const hash = location.hash.slice(1);
   if (hash.startsWith('alert/')) { openAlert(decodeURIComponent(hash.slice(6))); return; }
-  if (['overview', 'alerts', 'review', 'health', 'usage'].includes(hash)) { activePage = hash; closeDrawer(); render(); }
+  if (['overview', 'inventory', 'alerts', 'review', 'health', 'usage'].includes(hash)) { activePage = hash; closeDrawer(); render(); }
   else if (!hash) { activePage = 'overview'; render(); }
 });
 loadData();
