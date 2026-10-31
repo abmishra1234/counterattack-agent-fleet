@@ -44,6 +44,45 @@ from counterstrike.repositories import create_run
 
 REQUEST_ID_PATTERN = re.compile("^[A-Za-z0-9._-]{1,64}$")
 IDEMPOTENCY_KEY_PATTERN = re.compile("^[A-Za-z0-9._:-]{8,160}$")
+AUDIT_QUERY_VALUE_PATTERNS = {
+    "limit": re.compile(r"^[0-9]{1,3}$"),
+    "offset": re.compile(r"^[0-9]{1,7}$"),
+    "priority": re.compile(r"^P[1-4]$"),
+    "state": re.compile(r"^[a-z_]{1,24}$"),
+    "status": re.compile(r"^[a-z_]{1,24}$"),
+    "outcome": re.compile(r"^[a-z_]{1,24}$"),
+    "run_id": re.compile(r"^[0-9a-fA-F-]{1,36}$"),
+    "advisory_id": re.compile(r"^[0-9a-fA-F-]{1,36}$"),
+    "source_id": re.compile(r"^[0-9a-fA-F-]{1,36}$"),
+    "since": re.compile(r"^[0-9TZ:+.\-]{1,40}$"),
+    "until": re.compile(r"^[0-9TZ:+.\-]{1,40}$"),
+    "provider": re.compile(r"^[A-Za-z0-9._-]{1,80}$"),
+    "model": re.compile(r"^[A-Za-z0-9._:-]{1,80}$"),
+    "task": re.compile(r"^[A-Za-z0-9._-]{1,40}$"),
+    "prompt_version": re.compile(r"^[A-Za-z0-9._:-]{1,80}$"),
+    "group_by": re.compile(r"^[a-z_]{1,24}$"),
+    "currency": re.compile(r"^[A-Z]{3}$"),
+}
+AUDIT_QUERY_VALUE_OMITTED = frozenset({"search", "owner", "service", "actor_id"})
+
+
+def _safe_audit_query_parameters(query_params):
+    """Keep bounded, recognized filters in audit records, never free-text values."""
+    values: dict[str, str | list[str]] = {}
+    omitted_names: set[str] = set()
+    for key, value in list(query_params.multi_items())[:32]:
+        pattern = AUDIT_QUERY_VALUE_PATTERNS.get(key)
+        if pattern is not None and pattern.fullmatch(value):
+            if key in values:
+                existing = values[key]
+                values[key] = (
+                    [*existing, value] if isinstance(existing, list) else [existing, value]
+                )
+            else:
+                values[key] = value
+        elif key in AUDIT_QUERY_VALUE_OMITTED:
+            omitted_names.add(key)
+    return values, sorted(omitted_names)
 
 
 class HealthResponse(BaseModel):
@@ -94,6 +133,26 @@ class RunDetailResponse(RunListItem):
     policy_version: str | None
     prompt_versions: dict[str, str]
     trace: list[dict[str, Any]]
+
+
+class RunAcceptedResponse(BaseModel):
+    run: RunListItem
+    run_id: str
+    status_url: str
+    accepted_at: datetime
+    job_id: str
+    deduplicated: bool
+
+
+class AuthContextResponse(BaseModel):
+    identity: str
+    role: str
+    mode: str
+    capabilities: list[str]
+    data_mode: str
+    persistence_mode: str
+    llm_provider: str
+    llm_live_calls_enabled: bool
 
 
 class SourceItem(BaseModel):
@@ -157,7 +216,7 @@ class ReviewDecisionItem(BaseModel):
     id: str
     actor_id: str
     disposition: str
-    note: str
+    note: str | None
     created_at: datetime
 
 
@@ -182,6 +241,12 @@ class ReviewListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class ReviewDecisionResponse(BaseModel):
+    review_id: str
+    state: str
+    decision: ReviewDecisionItem
 
 
 class ReviewDecisionRequest(BaseModel):
@@ -329,6 +394,14 @@ class LLMContentReadRequest(BaseModel):
         if len(cleaned) < 8:
             raise ValueError("A specific audit purpose is required")
         return cleaned
+
+
+class LLMContentReadResponse(BaseModel):
+    call_id: str
+    kind: Literal["request", "response", "parsed_output", "error", "provider_error"]
+    content: Any
+    plaintext_hash: str
+    purpose: str
 
 
 def _read_json(path):
@@ -616,7 +689,9 @@ def create_app(settings=None):
             "safe_error_code": record.safe_error_code,
         }
 
-    @app.get("/api/v1/auth/context", tags=["auth"])
+    @app.get(
+        "/api/v1/auth/context", response_model=AuthContextResponse, tags=["auth"]
+    )
     def auth_context():
         return {
             "identity": settings.local_dev_identity,
@@ -744,7 +819,12 @@ def create_app(settings=None):
             "offset": offset,
         }
 
-    @app.post("/api/v1/runs", status_code=202, tags=["runs"])
+    @app.post(
+        "/api/v1/runs",
+        status_code=202,
+        response_model=RunAcceptedResponse,
+        tags=["runs"],
+    )
     def queue_run(
         idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=160),
         session=Depends(db_session),
@@ -988,7 +1068,12 @@ def create_app(settings=None):
         session.commit()
         return {"items": items, "total": total, "limit": limit, "offset": offset}
 
-    @app.post("/api/v1/reviews/{review_id}/decision", status_code=201, tags=["reviews"])
+    @app.post(
+        "/api/v1/reviews/{review_id}/decision",
+        status_code=201,
+        response_model=ReviewDecisionResponse,
+        tags=["reviews"],
+    )
     def submit_review_decision(
         review_id: str, decision: ReviewDecisionRequest, session=Depends(db_session)
     ):
@@ -1577,7 +1662,11 @@ def create_app(settings=None):
             ],
         }
 
-    @app.post("/api/v1/llm/usage/{call_id}/content", tags=["llm-usage"])
+    @app.post(
+        "/api/v1/llm/usage/{call_id}/content",
+        response_model=LLMContentReadResponse,
+        tags=["llm-usage"],
+    )
     def read_llm_content(call_id, request_body: LLMContentReadRequest, session=Depends(db_session)):
         from counterstrike.artifacts import read_artifact
 
@@ -1725,20 +1814,9 @@ def create_app(settings=None):
             )
             response.headers["X-Request-ID"] = request_id
             if required_capability(request.url.path, request.method) is not None:
-                query_parameters = {
-                    key[:64]: value[:500]
-                    for key, value in list(request.query_params.multi_items())[:32]
-                    if not any(
-                        marker in key.lower()
-                        for marker in (
-                            "token",
-                            "secret",
-                            "password",
-                            "key",
-                            "auth",
-                        )
-                    )
-                }
+                query_parameters, omitted_filter_names = _safe_audit_query_parameters(
+                    request.query_params
+                )
                 try:
                     factory = get_session_factory(settings)
                     with factory() as session:
@@ -1757,6 +1835,7 @@ def create_app(settings=None):
                                 "status_code": response.status_code,
                                 "duration_ms": duration_ms,
                                 "query_parameters": query_parameters,
+                                "omitted_filter_names": omitted_filter_names,
                             },
                         )
                         session.commit()

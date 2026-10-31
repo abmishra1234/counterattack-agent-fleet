@@ -141,11 +141,11 @@ def _reserve_budget(
     task: str,
     prompt_version: str,
     advisory_id: str | None,
-) -> Decimal | None:
+) -> tuple[Decimal | None, datetime | None]:
     run_limit = settings.llm_max_cost_per_run_usd
     month_limit = settings.llm_max_cost_per_month_usd
     if run_limit is None and month_limit is None:
-        return None
+        return None, None
     if session.bind is None or session.bind.dialect.name != "postgresql":
         raise RuntimeError("LLM spend ceilings require PostgreSQL")
     if rate is None:
@@ -165,10 +165,8 @@ def _reserve_budget(
             prompt_version=prompt_version,
             safe_details={"task": task, "reason": "no_active_pricing_rate"},
         )
-        return None
+        return None, None
 
-    now = datetime.now(timezone.utc)
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     input_bound = len(serialize_exchange(provider_request).encode("utf-8"))
     estimate = (
         Decimal(input_bound) * rate.input_rate_per_million
@@ -177,7 +175,9 @@ def _reserve_budget(
     estimate = estimate.quantize(Decimal("0.0000000001"), rounding=ROUND_CEILING)
     scopes = []
     if month_limit is not None:
-        scopes.append((f"month:{month_start:%Y-%m}", month_start, month_limit, "month"))
+        # Serialize period selection across month boundaries too. The lock is held
+        # only through request persistence, before provider I/O begins.
+        scopes.append(("month:global", None, month_limit, "month"))
     if run_limit is not None:
         scopes.append((f"run:{run_id}", None, run_limit, "run"))
     for lock_key, _, _, _ in sorted(scopes):
@@ -186,16 +186,21 @@ def _reserve_budget(
             {"budget_scope": lock_key},
         )
 
+    # Capture the billing window only after acquiring the lock. Capturing it
+    # before a wait lets a concurrent transaction omit reservations committed
+    # while it was waiting.
+    budget_checked_at = datetime.now(timezone.utc)
+    month_start = budget_checked_at.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
     effective_cost = case(
         (LLMCall.cost_amount.is_(None), LLMCall.budget_estimate_usd),
         (LLMCall.budget_estimate_usd.is_(None), LLMCall.cost_amount),
         (LLMCall.cost_amount >= LLMCall.budget_estimate_usd, LLMCall.cost_amount),
         else_=LLMCall.budget_estimate_usd,
     )
-    for _, period_start, limit, scope in scopes:
+    for _, _period_start, limit, scope in scopes:
         filters = [LLMCall.run_id == run_id] if scope == "run" else [
-            LLMCall.started_at >= period_start,
-            LLMCall.started_at < now,
+            LLMCall.started_at >= month_start,
         ]
         unknown_count = session.scalar(
             select(func.count(LLMCall.id)).where(
@@ -233,8 +238,8 @@ def _reserve_budget(
                     "estimated_call_usd": format(estimate, "f"),
                 },
             )
-            return None
-    return estimate
+            return None, None
+    return estimate, budget_checked_at
 def prepare_attempt(
     session: Session,
     *,
@@ -257,7 +262,7 @@ def prepare_attempt(
     provider_request_json = serialize_exchange(provider_request)
     now = datetime.now(timezone.utc)
     rate = _pricing_rate(session, settings, now)
-    budget_estimate = _reserve_budget(
+    budget_estimate, budget_checked_at = _reserve_budget(
         session,
         settings=settings,
         run_id=run_id,
@@ -291,7 +296,7 @@ def prepare_attempt(
         prompt_hash=hashlib.sha256(provider_request_json.encode("utf-8")).hexdigest(),
         attempt_key=call_id,
         attempt_number=attempt_number,
-        started_at=datetime.now(timezone.utc),
+        started_at=budget_checked_at or datetime.now(timezone.utc),
         outcome="pending",
         budget_estimate_usd=budget_estimate,
         pricing_version=rate.pricing_version if rate else None,

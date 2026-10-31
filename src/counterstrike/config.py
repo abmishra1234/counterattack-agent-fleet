@@ -7,6 +7,7 @@ values so deployment secret stores remain authoritative.
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -99,6 +100,10 @@ class Settings(BaseModel):
     out_dir: Path = PROJECT_ROOT / "out"
     database_url: SecretStr | None = None
 
+    outbox_enqueue_enabled: bool = False
+    outbox_channel: Literal["email", "teams"] | None = None
+    outbox_recipient_map_json: SecretStr | None = None
+
     llm_provider: Literal["fake", "openai_compatible"] = "fake"
     llm_live_calls_enabled: bool = False
     llm_data_boundary_approved: bool = False
@@ -186,8 +191,38 @@ class Settings(BaseModel):
             raise ValueError("LLM_PRICING_EFFECTIVE_AT must include a timezone")
         return value.astimezone(timezone.utc)
 
+    @field_validator("outbox_recipient_map_json")
+    @classmethod
+    def validate_outbox_recipient_map(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        try:
+            mapping = json.loads(value.get_secret_value())
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("OUTBOX_RECIPIENT_MAP_JSON must be a JSON object") from exc
+        if (
+            not isinstance(mapping, dict)
+            or not mapping
+            or len(mapping) > 5000
+            or any(
+                not isinstance(owner, str)
+                or not owner.strip()
+                or len(owner) > 200
+                or not isinstance(recipient, str)
+                or not recipient.strip()
+                or len(recipient) > 320
+                for owner, recipient in mapping.items()
+            )
+        ):
+            raise ValueError("OUTBOX_RECIPIENT_MAP_JSON must map owners to bounded recipient refs")
+        return value
+
     @model_validator(mode="after")
     def validate_runtime_policy(self) -> Settings:
+        if self.outbox_enqueue_enabled and (
+            self.outbox_channel is None or self.outbox_recipient_map_json is None
+        ):
+            raise ValueError("Enabled outbox enqueue requires OUTBOX_CHANNEL and recipient mapping")
         if self.environment == "production" and self.api_trusted_local_client_cidrs:
             raise ValueError("API_TRUSTED_LOCAL_CLIENT_CIDRS is only permitted outside production")
         if self.environment == "production" and self.api_host.lower() not in {
@@ -252,6 +287,12 @@ class Settings(BaseModel):
             raise ValueError("Production mode requires DATABASE_URL")
         return self
 
+    @property
+    def outbox_recipient_refs(self) -> dict[str, str]:
+        if self.outbox_recipient_map_json is None:
+            return {}
+        return json.loads(self.outbox_recipient_map_json.get_secret_value())
+
 
 def load_settings(dotenv_path: Path = DOTENV_PATH) -> Settings:
     """Load settings with OS environment taking precedence over local .env values."""
@@ -284,6 +325,11 @@ def load_settings(dotenv_path: Path = DOTENV_PATH) -> Settings:
             data_dir=configured_path("DATA_DIR", PROJECT_ROOT / "data"),
             out_dir=configured_path("OUT_DIR", PROJECT_ROOT / "out"),
             database_url=optional("DATABASE_URL"),
+            outbox_enqueue_enabled=_as_bool(
+                values.get("OUTBOX_ENQUEUE_ENABLED", "false"), "OUTBOX_ENQUEUE_ENABLED"
+            ),
+            outbox_channel=optional("OUTBOX_CHANNEL"),
+            outbox_recipient_map_json=optional("OUTBOX_RECIPIENT_MAP_JSON"),
             llm_provider=provider,
             llm_live_calls_enabled=_as_bool(
                 values.get("LLM_LIVE_CALLS_ENABLED", "false"), "LLM_LIVE_CALLS_ENABLED"

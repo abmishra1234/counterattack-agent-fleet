@@ -10,15 +10,19 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from counterstrike.audit import append_event
+from counterstrike.config import Settings, load_settings
 from counterstrike.db_models import (
     AdvisoryRecord,
     AlertRecord,
     InventoryAsset,
     InventorySnapshot,
     MatchRecord,
+    OutboxMessage,
     ReviewCase,
     RunRecord,
     Source,
@@ -106,12 +110,14 @@ def persist_run_results(
     state: FleetState,
     *,
     policy_version: str = "risk-v1",
+    settings: Settings | None = None,
 ) -> RunRecord:
     """Persist a complete graph result atomically with run completion.
 
     The caller owns the transaction. Any exception leaves no partial output once
     the surrounding transaction rolls back.
     """
+    settings = settings or load_settings()
     run = session.get(RunRecord, run_id)
     if run is None:
         raise LookupError("run_not_found")
@@ -232,7 +238,10 @@ def persist_run_results(
         advisory = advisory_records.get(alert.cve_id)
         scored_match = score_details.get(pair)
         row = AlertRecord(
-            id=alert.alert_id,
+            # The graph's alert ID is a deterministic finding key and can recur
+            # in later runs. Persist a new row ID per run while retaining that
+            # stable value as alert_key.
+            id=str(uuid4()),
             run_id=run.id,
             match_id=match_row.id,
             alert_key=alert.alert_id,
@@ -256,6 +265,9 @@ def persist_run_results(
             ] if advisory else [],
         )
         session.add(row)
+        session.flush()
+        if settings.outbox_enqueue_enabled:
+            _enqueue_alert_delivery(session, run=run, alert=row, settings=settings)
 
     seen_reviews: set[tuple[str, str]] = set()
     for item in state.get("needs_human", []):
@@ -307,3 +319,91 @@ def persist_run_results(
         policy_version=policy_version,
     )
     return run
+
+
+def _enqueue_alert_delivery(
+    session: Session,
+    *,
+    run: RunRecord,
+    alert: AlertRecord,
+    settings: Settings,
+) -> None:
+    """Persist one stable delivery intent in the run-results transaction."""
+    channel = settings.outbox_channel
+    recipient_ref = settings.outbox_recipient_refs.get(alert.owner)
+    if channel is None or recipient_ref is None:
+        raise ValueError("delivery_recipient_not_configured")
+    payload = {
+        "run_id": run.id,
+        "alert_id": alert.id,
+        "alert_key": alert.alert_key,
+        "cve_id": alert.cve_id,
+        "asset_key": alert.asset_key,
+        "service": alert.service,
+        "component": alert.component,
+        "installed_version": alert.installed_version,
+        "fixed_version": alert.fixed_version,
+        "priority": alert.priority,
+        "risk_score": format(Decimal(str(alert.risk_score)).quantize(Decimal("0.001")), "f"),
+        "sla_hours": alert.sla_hours,
+        "owner": alert.owner,
+        "summary": alert.summary,
+        "remediation": alert.remediation,
+        "evidence": alert.evidence,
+        "source_references": alert.source_references,
+    }
+    encoded_payload = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    payload_hash = hashlib.sha256(encoded_payload).hexdigest()
+    identity = f"{run.id}:{alert.alert_key}:{channel}:{recipient_ref}".encode()
+    idempotency_key = hashlib.sha256(identity).hexdigest()
+    dialect = session.bind.dialect.name if session.bind is not None else ""
+    insert = (
+        postgresql_insert
+        if dialect == "postgresql"
+        else sqlite_insert
+        if dialect == "sqlite"
+        else None
+    )
+    if insert is None:
+        raise RuntimeError("Delivery outbox requires PostgreSQL or SQLite")
+    proposed_outbox_id = str(uuid4())
+    result = session.execute(
+        insert(OutboxMessage)
+        .values(
+            id=proposed_outbox_id,
+            run_id=run.id,
+            alert_id=alert.id,
+            channel=channel,
+            recipient_ref=recipient_ref,
+            idempotency_key=idempotency_key,
+            payload=payload,
+            payload_hash=payload_hash,
+            status="queued",
+            attempt=0,
+        )
+        .on_conflict_do_nothing(index_elements=[OutboxMessage.idempotency_key])
+        .returning(OutboxMessage.id)
+    )
+    outbox_id = result.scalar_one_or_none()
+    if outbox_id is not None:
+        append_event(
+            session,
+            actor_type="service",
+            actor_id="delivery-outbox",
+            action="delivery_enqueued",
+            event_type="delivery.outbox.enqueued",
+            outcome="success",
+            resource_type="outbox_message",
+            resource_id=outbox_id,
+            request_id=run.request_id,
+            run_id=run.id,
+            alert_id=alert.id,
+            safe_details={
+                "channel": channel,
+                "idempotency_key": idempotency_key,
+                "payload_hash": payload_hash,
+                "recipient_hash": hashlib.sha256(recipient_ref.encode("utf-8")).hexdigest()[:16],
+            },
+        )

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import secrets
@@ -17,21 +16,13 @@ from sqlalchemy.orm import Session
 from counterstrike.audit import append_event
 from counterstrike.config import Settings, load_settings
 from counterstrike.db_models import LLMAuditAccess, LLMExchangeArtifact
+from counterstrike.key_providers import get_encryption_key_provider
 
 
-def _cipher(settings: Settings) -> tuple[AESGCM, str]:
-    configured = settings.llm_audit_encryption_key
-    if configured is None:
-        raise RuntimeError("LLM audit encryption key is not configured")
-    try:
-        key = base64.b64decode(
-            configured.get_secret_value().encode("ascii"), altchars=b"-_", validate=True
-        )
-    except (ValueError, UnicodeEncodeError) as exc:
-        raise RuntimeError("LLM audit encryption key must be URL-safe base64") from exc
-    if len(key) != 32:
-        raise RuntimeError("LLM audit encryption key must decode to 32 bytes")
-    return AESGCM(key), settings.llm_audit_encryption_key_version
+def _cipher(settings: Settings, version: str | None = None) -> tuple[AESGCM, str]:
+    key_version = version or settings.llm_audit_encryption_key_version
+    key = get_encryption_key_provider(settings).get_key(key_version)
+    return AESGCM(key), key_version
 
 
 def store_artifact(
@@ -99,9 +90,7 @@ def read_artifact(
         outcome = "expired"
     elif authorized:
         try:
-            cipher, active_version = _cipher(settings)
-            if active_version != artifact.encryption_key_version:
-                raise RuntimeError("Artifact key version unavailable")
+            cipher, _ = _cipher(settings, artifact.encryption_key_version)
             nonce, ciphertext = artifact.encrypted_payload[:12], artifact.encrypted_payload[12:]
             aad = (
                 f"{artifact.id}:{artifact.llm_call_id}:{artifact.artifact_kind}:"

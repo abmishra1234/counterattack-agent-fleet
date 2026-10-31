@@ -50,6 +50,24 @@ def claim_job(worker_id: str, lease_seconds: int = 90) -> str | None:
             job.lease_owner = None
             job.lease_expires_at = None
             job.last_error_code = job.last_error_code or "attempt_limit_reached"
+            if job.run_id:
+                record = session.get(RunRecord, job.run_id)
+                if record is not None and record.status in {"queued", "running"}:
+                    record.status = "failed"
+                    record.safe_error_code = job.last_error_code
+                    record.completed_at = now
+                    append_event(
+                        session,
+                        actor_type="service",
+                        action="run_failed",
+                        event_type="run.lifecycle.failed",
+                        outcome="failure",
+                        resource_type="run",
+                        resource_id=record.id,
+                        request_id=record.request_id,
+                        run_id=record.id,
+                        safe_details={"error_code": job.last_error_code},
+                    )
             append_event(
                 session, actor_type="service", action="job_failed",
                 event_type="job.lifecycle.failed", outcome="failure",
@@ -189,7 +207,7 @@ def process_job(job_id: str, worker_id: str, lease_seconds: int = 90) -> None:
         if lost_lease.is_set():
             raise RuntimeError("lease_lost")
         with session_scope() as session:
-            persist_run_results(session, run_id, result)
+            persist_run_results(session, run_id, result, settings=settings)
             _finish_job_session(session, job_id, worker_id)
     except Exception as exc:
         stopped.set()
