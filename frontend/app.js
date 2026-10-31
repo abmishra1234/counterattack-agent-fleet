@@ -490,8 +490,16 @@ function renderHealth() {
     <article class="panel" style="margin-bottom:15px"><div class="panel-header"><div><div class="panel-title">Pipeline stages</div><div class="panel-subtitle">Agent timings and source status from the latest persisted run</div></div><span class="mono-label">${trace.length} steps recorded</span></div><div class="pipeline">${trace.map((stage) => `<div class="pipeline-step"><span class="pipeline-circle">&#10003;</span><strong>${escapeHtml(pipelineStepName(stage))}</strong><small>${escapeHtml(pipelineStepMetric(stage))}</small></div>`).join('')}</div></article>
     <article class="panel" style="margin-bottom:15px"><div class="panel-header"><div><div class="panel-title">Configured sources</div><div class="panel-subtitle">Feed state and the latest successful poll</div></div></div><div class="source-list">${sourceCards}</div></article>
     <article class="panel"><div class="panel-header"><div><div class="panel-title">Agent trace</div><div class="panel-subtitle">Detailed output from the latest run</div></div></div><div class="agent-list"><div class="agent-row agent-header"><div class="agent-name">Stage</div><div class="agent-cell">Items<small>output</small></div><div class="agent-cell">Duration<small>milliseconds</small></div><div class="agent-cell">LLM calls<small>recorded</small></div><div class="agent-cell">State<small>from trace</small></div></div>${trace.map((stage) => {
-      const count = stage.alerts ?? stage.scored ?? stage.matches ?? stage.extracted ?? stage.advisories ?? stage.owners ?? 'Not recorded';
-      return `<div class="agent-row"><div class="agent-name"><span class="agent-icon">&#10003;</span>${escapeHtml(friendlyName(stage.agent))}</div><div class="agent-cell">${count}<small>items</small></div><div class="agent-cell">${stage.ms ?? 'Not recorded'}<small>ms</small></div><div class="agent-cell">${stage.llm_calls ?? 0}<small>${stage.llm || 'no LLM'}</small></div><div>${statusBadge('Recorded', 'healthy')}</div></div>`;
+      const output = pipelineStepOutput(stage);
+      const duration = stage.ms != null
+        ? `${stage.ms}<small>ms</small>`
+        : stage.source_status
+          ? `${escapeHtml(friendlyName(stage.source_status))}<small>source status</small>`
+          : `Not recorded<small>ms</small>`;
+      const state = stage.source_status
+        ? statusBadge(friendlyName(stage.source_status), stage.source_status === 'success' ? 'healthy' : 'review')
+        : statusBadge('Recorded', 'healthy');
+      return `<div class="agent-row"><div class="agent-name"><span class="agent-icon">&#10003;</span>${escapeHtml(pipelineStepName(stage))}</div><div class="agent-cell">${escapeHtml(output.value)}<small>${escapeHtml(output.label)}</small></div><div class="agent-cell">${duration}</div><div class="agent-cell">${stage.llm_calls ?? 0}<small>${escapeHtml(stage.llm || 'no LLM')}</small></div><div>${state}</div></div>`;
     }).join('')}</div></article>`;
 }
 function renderUsage() {
