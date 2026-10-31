@@ -353,14 +353,14 @@ class ReviewSourceStatus(BaseModel):
 
 
 class SourceReference(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
-    url: str | None = None
-    name: str | None = None
-    source: str | None = None
-    advisory_id: str | None = None
-    type: str | None = None
-    tags: list[str] = Field(default_factory=list)
+    url: str | None = Field(default=None, max_length=2048)
+    name: str | None = Field(default=None, max_length=300)
+    source: str | None = Field(default=None, max_length=100)
+    advisory_id: str | None = Field(default=None, max_length=100)
+    type: str | None = Field(default=None, max_length=100)
+    tags: list[str] = Field(default_factory=list, max_length=32)
 
 
 class MatchExplanation(BaseModel):
@@ -463,6 +463,54 @@ def _is_http_source_url(value: Any) -> bool:
         and parsed.password is None
         and (port is None or 1 <= port <= 65535)
     )
+
+
+def _sanitize_source_reference(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    url = value.get("url")
+    url = url.strip() if isinstance(url, str) else ""
+    if not _is_http_source_url(url):
+        return None
+
+    def bounded_text(name: str, limit: int) -> str | None:
+        raw = value.get(name)
+        if not isinstance(raw, str):
+            return None
+        cleaned = raw.strip()
+        if not cleaned or any(ord(char) < 32 or ord(char) == 127 for char in cleaned):
+            return None
+        return cleaned[:limit]
+
+    raw_tags = value.get("tags")
+    tags = []
+    if isinstance(raw_tags, list):
+        for tag in raw_tags[:32]:
+            if (
+                isinstance(tag, str)
+                and tag.strip()
+                and not any(ord(char) < 32 or ord(char) == 127 for char in tag)
+            ):
+                tags.append(tag.strip()[:100])
+    return {
+        "url": url,
+        "name": bounded_text("name", 300),
+        "source": bounded_text("source", 100),
+        "advisory_id": bounded_text("advisory_id", 100),
+        "type": bounded_text("type", 100),
+        "tags": tags,
+    }
+
+
+def _sanitize_source_references(values: Any) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        return []
+    result = []
+    for value in values:
+        reference = _sanitize_source_reference(value)
+        if reference is not None:
+            result.append(reference)
+    return result
 
 
 class AlertListItem(BaseModel):
@@ -1489,6 +1537,9 @@ def create_app(settings=None):
                 if advisory
                 else {}
             )
+            source_references = (
+                _sanitize_source_references(advisory.source_references) if advisory else []
+            )
             items.append(
                 {
                     "id": review_case.id,
@@ -1500,7 +1551,7 @@ def create_app(settings=None):
                     "reason": review_case.reason,
                     "source_evidence": source_evidence,
                     "source_statuses": source_statuses,
-                    "source_references": (advisory.source_references or []) if advisory else [],
+                    "source_references": source_references,
                     "candidate_matches": candidate_matches.get(
                         (review_case.run_id, review_case.advisory_id), []
                     )[:20],
@@ -1966,11 +2017,7 @@ def create_app(settings=None):
         source_references = references_payload.get("references")
         if not isinstance(source_references, list):
             source_references = advisory_record.source_references if advisory_record else []
-        source_references = [
-            reference
-            for reference in source_references
-            if isinstance(reference, dict) and _is_http_source_url(reference.get("url"))
-        ]
+        source_references = _sanitize_source_references(source_references)
         remediation_tags = (
             {"patch", "vendor advisory", "release notes"}
             if record.fixed_version
