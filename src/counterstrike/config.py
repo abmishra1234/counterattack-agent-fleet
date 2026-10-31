@@ -500,7 +500,10 @@ class Settings(BaseModel):
                 "Production API must remain on loopback until authentication is implemented"
             )
 
-        if self.llm_provider in {"openai_compatible", "azure_openai"}:
+        if self.llm_live_calls_enabled and self.llm_provider in {
+            "openai_compatible",
+            "azure_openai",
+        }:
             if (
                 not self.llm_base_url
                 or not self.llm_api_key
@@ -711,4 +714,9 @@ def load_settings(dotenv_path: Path = DOTENV_PATH) -> Settings:
             {str(error["loc"][0]) for error in exc.errors() if error.get("loc")}
         )
         field_list = ", ".join(invalid_fields) or "configuration"
-        raise ValueError(f"Invalid Counterstrike settings for: {field_list}") from None
+        # Pydantic model-level policy errors have no field location. Keep their
+        # safe, setting-oriented message so operators can correct the config
+        # without exposing any configured values (especially credentials).
+        details = sorted({str(error["msg"]) for error in exc.errors() if error.get("msg")})
+        detail_text = f" ({'; '.join(details)})" if details and not invalid_fields else ""
+        raise ValueError(f"Invalid Counterstrike settings for: {field_list}{detail_text}") from None
