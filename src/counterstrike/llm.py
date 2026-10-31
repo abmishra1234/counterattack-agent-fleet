@@ -313,6 +313,10 @@ class GatewayLLM:
                             if response_size > settings.llm_max_response_bytes:
                                 response_too_large = True
                                 break
+                    # iter_bytes() already decoded content compression. Reusing
+                    # its encoding header would decompress the body a second time.
+                    response_headers.pop("content-encoding", None)
+                    response_headers.pop("content-length", None)
                     response = httpx.Response(
                         response_status,
                         headers=response_headers,
