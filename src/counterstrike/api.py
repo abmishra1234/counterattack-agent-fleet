@@ -1411,9 +1411,11 @@ def create_app(settings=None):
                     "llm_calls",
                     "source_status",
                     "source_error_code",
+                    "advisories",
                     "assets",
                     "extracted",
                     "matches",
+                    "scored",
                     "alerts",
                     "owners",
                 )

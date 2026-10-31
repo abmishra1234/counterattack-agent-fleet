@@ -41,6 +41,23 @@ const friendlyName = (value = '') => value.split(/[-_]/).map((part) => part ? pa
 const priorityClass = (priority = 'P4') => `priority-${priority}`;
 const pipelineStepName = (stage = {}) => stage.agent === 'ingest' && stage.source_id === 'fixture-json' ? 'Fixture Feed' : friendlyName(stage.agent || 'Unknown step');
 const pipelineStepMetric = (stage = {}) => stage.ms != null ? `${stage.ms} ms` : stage.source_status ? friendlyName(stage.source_status) : 'Timing unavailable';
+const pipelineStepOutput = (stage = {}) => {
+  if (stage.agent === 'ingest') {
+    const values = [];
+    if (stage.advisories != null) values.push(stage.advisories);
+    if (stage.assets != null) values.push(stage.assets);
+    return { value: values.length ? values.join(' / ') : 'Not recorded', label: values.length > 1 ? 'advisories / assets' : stage.advisories != null ? 'advisories' : stage.assets != null ? 'assets' : 'items' };
+  }
+  const output = [
+    ['alerts', 'alerts'],
+    ['scored', 'scored'],
+    ['matches', 'matches'],
+    ['extracted', 'extracted'],
+    ['advisories', 'advisories'],
+    ['owners', 'owners'],
+  ].find(([key]) => stage[key] != null);
+  return output ? { value: stage[output[0]], label: output[1] } : { value: 'Not recorded', label: 'items' };
+};
 const sourceLabel = (advisory) => advisory?.source ? friendlyName(advisory.source) : 'Source unavailable';
 
 async function apiRequest(path, options = {}) {
