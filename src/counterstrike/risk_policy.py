@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
 
-POLICY_VERSION = "req-fr6-kev-internet-p1-v1"
+POLICY_VERSION = "req-fr6-kev-internet-p1-v2"
 
 KEV_BONUS = 2.0
 INTERNET_BONUS = 1.5

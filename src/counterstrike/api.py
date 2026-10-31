@@ -1924,6 +1924,27 @@ def create_app(settings=None):
             else None
         )
         advisory_payload = advisory_record.normalized_payload or {} if advisory_record else {}
+        stored_kev_status = (record.score_breakdown or {}).get("kev_status")
+        payload_kev_status = advisory_payload.get("kev_status")
+        if not isinstance(payload_kev_status, str) or payload_kev_status not in {
+            "listed",
+            "not_listed",
+            "unknown",
+        }:
+            payload_kev_status = (
+                "listed"
+                if advisory_payload.get("in_kev") is True
+                else "not_listed"
+                if advisory_payload.get("in_kev") is False
+                else "unknown"
+            )
+        kev_status = (
+            stored_kev_status
+            if isinstance(stored_kev_status, str)
+            and stored_kev_status in {"listed", "not_listed", "unknown"}
+            else payload_kev_status
+        )
+        in_kev = True if kev_status == "listed" else False if kev_status == "not_listed" else None
         advisory_context = (
             {
                 "title": advisory_record.title,
@@ -1931,15 +1952,8 @@ def create_app(settings=None):
                 "published": advisory_payload.get("published"),
                 "cvss": float(advisory_record.cvss) if advisory_record.cvss is not None else None,
                 "text": str(advisory_payload.get("text") or "")[:20000],
-                "in_kev": advisory_payload.get("in_kev"),
-                "kev_status": advisory_payload.get(
-                    "kev_status",
-                    "listed"
-                    if advisory_payload.get("in_kev") is True
-                    else "not_listed"
-                    if advisory_payload.get("in_kev") is False
-                    else "unknown",
-                ),
+                "in_kev": in_kev,
+                "kev_status": kev_status,
                 "references": source_references,
                 "epss": epss_context,
             }

@@ -224,6 +224,13 @@ def remediate_agent(state: FleetState, llm: LLMPort) -> dict:
     fallback_reasons: dict[str, int] = {}
     for i, s in enumerate(state["scored"], start=1):
         adv, asset = advs[s.advisory_id], assets[s.asset_id]
+        kev_status = (
+            "listed"
+            if adv.in_kev is True
+            else "not_listed"
+            if adv.in_kev is False
+            else "unknown"
+        )
         facts = {
             "cve_id": s.advisory_id,
             "title": adv.title,
@@ -235,9 +242,7 @@ def remediate_agent(state: FleetState, llm: LLMPort) -> dict:
             "priority": s.priority,
             "cvss": f"{adv.cvss:.1f}",
             "kev_listed": adv.in_kev,
-            "kev_status": (
-                "listed" if adv.in_kev is True else "not_listed" if adv.in_kev is False else "unknown"
-            ),
+            "kev_status": kev_status,
             "internet_facing": asset.internet_facing,
             "business_criticality": asset.criticality,
         }

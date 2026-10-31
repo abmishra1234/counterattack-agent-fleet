@@ -111,6 +111,11 @@ def _persist_source_syncs(session: Session, run_id: str, state: FleetState) -> N
                 "source_id": source_id,
                 "record_count": max(0, int(sync.get("record_count", 0))),
                 **(
+                    {"catalog_version": str(sync["catalog_version"])[:80]}
+                    if isinstance(sync.get("catalog_version"), str)
+                    else {}
+                ),
+                **(
                     {"error_code": checkpoint.last_error_code}
                     if checkpoint.last_error_code
                     else {}
