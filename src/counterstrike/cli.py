@@ -22,7 +22,9 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--data", default="data")
     r.add_argument("--out", default="out")
     r.add_argument(
-        "--llm", default=None, choices=["fake", "gateway"]
+        "--llm",
+        default=None,
+        choices=["fake", "gateway", "openai_compatible", "azure_openai"],
     )
 
     e = sub.add_parser("eval", help="score a run against gold labels and enforce the gate")
@@ -42,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
                 dotenv.get("LLM_PROVIDER", dotenv.get("COUNTERSTRIKE_LLM", "fake")),
             ),
         )
-        if provider == "openai_compatible":
+        if provider in {"openai_compatible", "azure_openai"}:
             provider = "gateway"
         try:
             llm = get_llm(provider)

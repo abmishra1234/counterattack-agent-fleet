@@ -542,11 +542,12 @@ def fetch_public_feed_bundle(
                 if cursor is None:
                     break
             sync_status = "partial" if cursor is not None else "success"
+            nvd_fetched_at = datetime.now(timezone.utc).isoformat()
             syncs.append(
                 {
                     "source_id": nvd.source_id,
                     "status": sync_status,
-                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                    "fetched_at": nvd_fetched_at,
                     "next_cursor": cursor,
                     "record_count": len(advisories),
                     "error_code": "page_limit_reached" if cursor is not None else None,
@@ -557,16 +558,18 @@ def fetch_public_feed_bundle(
                     "agent": "source_nvd",
                     "source_id": nvd.source_id,
                     "source_status": sync_status,
+                    "fetched_at": nvd_fetched_at,
                     "advisories": len(advisories),
                     **({"source_error_code": "page_limit_reached"} if cursor else {}),
                 }
             )
         except FeedFetchError as exc:
+            nvd_fetched_at = datetime.now(timezone.utc).isoformat()
             syncs.append(
                 {
                     "source_id": nvd.source_id,
                     "status": "failure",
-                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                    "fetched_at": nvd_fetched_at,
                     "next_cursor": cursor,
                     "record_count": len(advisories),
                     "error_code": exc.category,
@@ -577,6 +580,7 @@ def fetch_public_feed_bundle(
                     "agent": "source_nvd",
                     "source_id": nvd.source_id,
                     "source_status": "failure",
+                    "fetched_at": nvd_fetched_at,
                     "source_error_code": exc.category,
                     "advisories": len(advisories),
                 }
@@ -636,15 +640,18 @@ def fetch_public_feed_bundle(
                     "agent": "source_cisa_kev",
                     "source_id": kev_adapter.source_id,
                     "source_status": "success",
+                    "fetched_at": catalog.fetched_at.isoformat(),
                     "advisories": len(catalog.entries),
                 }
             )
         except FeedFetchError as exc:
+            kev_fetched_at = datetime.now(timezone.utc).isoformat()
             trace.append(
                 {
                     "agent": "source_cisa_kev",
                     "source_id": kev_adapter.source_id,
                     "source_status": "failure",
+                    "fetched_at": kev_fetched_at,
                     "source_error_code": exc.category,
                     "advisories": 0,
                 }
@@ -653,7 +660,7 @@ def fetch_public_feed_bundle(
                 {
                     "source_id": kev_adapter.source_id,
                     "status": "failure",
-                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                    "fetched_at": kev_fetched_at,
                     "next_cursor": None,
                     "record_count": 0,
                     "error_code": exc.category,
@@ -733,11 +740,12 @@ def fetch_public_feed_bundle(
                 )
             )
         advisories = enriched
+        osv_fetched_at = datetime.now(timezone.utc).isoformat()
         syncs.append(
             {
                 "source_id": osv.source_id,
                 "status": osv_status,
-                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "fetched_at": osv_fetched_at,
                 "next_cursor": None,
                 "record_count": osv_count,
                 "error_code": osv_error,
@@ -748,6 +756,7 @@ def fetch_public_feed_bundle(
                 "agent": "source_osv",
                 "source_id": osv.source_id,
                 "source_status": osv_status,
+                "fetched_at": osv_fetched_at,
                 "source_error_code": osv_error,
                 "advisories": osv_count,
             }
@@ -850,11 +859,12 @@ def fetch_public_feed_bundle(
                 for cve_id in processed_ids
             ]
             enrichments.extend(epss_enrichments)
+            epss_fetched_at = datetime.now(timezone.utc).isoformat()
             syncs.append(
                 {
                     "source_id": epss.source_id,
                     "status": epss_status,
-                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                    "fetched_at": epss_fetched_at,
                     "next_cursor": epss_next_cursor,
                     "record_count": len(processed_ids),
                     "error_code": epss_error,
@@ -865,6 +875,7 @@ def fetch_public_feed_bundle(
                     "agent": "source_epss",
                     "source_id": epss.source_id,
                     "source_status": epss_status,
+                    "fetched_at": epss_fetched_at,
                     "source_error_code": epss_error,
                     "advisories": len(processed_ids),
                     "scores_available": len(epss_scores),

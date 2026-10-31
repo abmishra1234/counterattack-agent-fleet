@@ -167,7 +167,7 @@ class Settings(BaseModel):
     nvd_api_key: SecretStr | None = None
     public_feed_timeout_seconds: float = Field(default=20, gt=0, le=120)
 
-    llm_provider: Literal["fake", "openai_compatible"] = "fake"
+    llm_provider: Literal["fake", "openai_compatible", "azure_openai"] = "fake"
     llm_live_calls_enabled: bool = False
     llm_data_boundary_approved: bool = False
     llm_artifact_retention_approved: bool = False
@@ -485,15 +485,15 @@ class Settings(BaseModel):
                 "Production API must remain on loopback until authentication is implemented"
             )
 
-        if self.llm_provider == "openai_compatible":
+        if self.llm_provider in {"openai_compatible", "azure_openai"}:
             if (
                 not self.llm_base_url
                 or not self.llm_api_key
                 or not self.llm_api_key.get_secret_value().strip()
             ):
-                raise ValueError("OpenAI-compatible provider requires LLM_BASE_URL and LLM_API_KEY")
+                raise ValueError("Live LLM provider requires LLM_BASE_URL and LLM_API_KEY")
             if not self.llm_model or not self.llm_model.strip():
-                raise ValueError("OpenAI-compatible provider requires LLM_MODEL")
+                raise ValueError("Live LLM provider requires LLM_MODEL")
             parsed = urlsplit(self.llm_base_url)
             if self.environment != "development" and parsed.scheme != "https":
                 raise ValueError("Live LLM calls require HTTPS outside development")
@@ -508,8 +508,10 @@ class Settings(BaseModel):
             if self.database_url is None:
                 raise ValueError("Live LLM calls require DATABASE_URL for durable request auditing")
         if self.llm_live_calls_enabled:
-            if self.llm_provider != "openai_compatible":
-                raise ValueError("Live LLM calls require LLM_PROVIDER=openai_compatible")
+            if self.llm_provider not in {"openai_compatible", "azure_openai"}:
+                raise ValueError(
+                    "Live LLM calls require LLM_PROVIDER=openai_compatible or azure_openai"
+                )
             if not self.llm_data_boundary_approved:
                 raise ValueError("Live LLM calls require approval of the provider data boundary")
             if not self.llm_artifact_retention_approved:

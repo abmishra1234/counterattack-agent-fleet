@@ -116,6 +116,9 @@ class GatewayLLM:
         ):
             raise RuntimeError("Live LLM provider configuration is incomplete")
         self.run_id = run_id
+        self.name = (
+            "azure-openai" if self.settings.llm_provider == "azure_openai" else "openai-compatible"
+        )
         self.request_id = request_id
         self.actor_id = actor_id
         self.job_id = job_id
@@ -203,13 +206,18 @@ class GatewayLLM:
 
     def complete(self, task: str, system: str, user: str, context: dict) -> str:
         settings = self.settings
+        token_limit_field = (
+            "max_completion_tokens"
+            if settings.llm_provider == "azure_openai"
+            else "max_tokens"
+        )
         provider_request = {
             "model": settings.llm_model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "max_tokens": settings.llm_max_output_tokens,
+            token_limit_field: settings.llm_max_output_tokens,
             "temperature": 0,
         }
         request_body = json.dumps(
@@ -228,10 +236,20 @@ class GatewayLLM:
         }
         attempt_base = 1
         endpoint = settings.llm_base_url.rstrip("/")
-        if not endpoint.endswith("/chat/completions"):
-            endpoint = f"{endpoint}/chat/completions"
         api_key = settings.llm_api_key.get_secret_value()
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        if settings.llm_provider == "azure_openai":
+            if not endpoint.endswith("/chat/completions"):
+                if not endpoint.endswith("/openai/v1"):
+                    endpoint = f"{endpoint}/openai/v1"
+                endpoint = f"{endpoint}/chat/completions"
+            headers = {"api-key": api_key, "Content-Type": "application/json"}
+        else:
+            if not endpoint.endswith("/chat/completions"):
+                endpoint = f"{endpoint}/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
         parent_call_id: str | None = None
         request_id = self.request_id or request_id_context.get()
         last_error_code = "provider_unavailable"
@@ -453,7 +471,7 @@ def get_llm(
         return FakeLLM()
     settings = settings or load_settings()
     provider = kind or settings.llm_provider
-    if provider in {"gateway", "openai_compatible"}:
+    if provider in {"gateway", "openai_compatible", "azure_openai"}:
         return GatewayLLM(
             settings,
             run_id=run_id,
@@ -463,4 +481,6 @@ def get_llm(
         )
     if provider == "fake":
         return FakeLLM()
-    raise ValueError(f"unknown llm backend '{provider}' (use fake or gateway)")
+    raise ValueError(
+        f"unknown llm backend '{provider}' (use fake, openai_compatible, or azure_openai)"
+    )

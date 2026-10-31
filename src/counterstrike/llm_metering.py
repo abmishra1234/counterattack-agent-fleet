@@ -25,11 +25,18 @@ class LLMBudgetExceeded(RuntimeError):
     """Raised after a durable audit event records that a spend limit blocked a call."""
 
 
+def _provider_name(settings: Settings) -> str:
+    if settings.llm_provider not in {"openai_compatible", "azure_openai"}:
+        raise RuntimeError("LLM metering requires a configured live provider")
+    return settings.llm_provider
+
+
 def _pricing_rate(session: Session, settings: Settings, now: datetime) -> LLMPricingRate | None:
     """Register the immutable configured rate version and select the active model rate."""
+    provider = _provider_name(settings)
     if settings.llm_input_price_usd_per_1m is not None:
         values = {
-            "provider": "openai_compatible",
+            "provider": provider,
             "model": settings.llm_model or "unknown",
             "pricing_version": settings.llm_pricing_version,
             "effective_from": settings.llm_pricing_effective_at,
@@ -119,7 +126,7 @@ def _pricing_rate(session: Session, settings: Settings, now: datetime) -> LLMPri
     return session.scalar(
         select(LLMPricingRate)
         .where(
-            LLMPricingRate.provider == "openai_compatible",
+            LLMPricingRate.provider == provider,
             LLMPricingRate.model == (settings.llm_model or "unknown"),
             LLMPricingRate.effective_from <= now,
         )
@@ -290,7 +297,7 @@ def prepare_attempt(
         advisory_id=advisory_id,
         parent_call_id=parent_call_id,
         task=task,
-        provider="openai_compatible",
+        provider=_provider_name(settings),
         model=model,
         prompt_version=prompt_version,
         prompt_hash=hashlib.sha256(provider_request_json.encode("utf-8")).hexdigest(),

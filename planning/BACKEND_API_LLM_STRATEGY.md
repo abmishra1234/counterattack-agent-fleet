@@ -145,7 +145,7 @@ Persist an inventory snapshot/version with each run. A later inventory change mu
 
 ### Provider decision
 
-Retain `LLMPort`, `FakeLLM`, and the existing `GatewayLLM` behavior as the compatibility baseline. Refactor provider creation into validated settings and adapters without putting provider-specific code into agents. Configure provider as `fake` or `openai_compatible` for the first implementation. Confirm the approved Azure endpoint shape before enabling production calls; add an `azure_openai` adapter if the endpoint is not OpenAI-compatible.
+Retain `LLMPort`, `FakeLLM`, and the existing `GatewayLLM` behavior as the compatibility baseline. Refactor provider creation into validated settings and adapters without putting provider-specific code into agents. Configure provider as `fake`, `openai_compatible`, or `azure_openai`. Azure's v1 chat-completions route uses the compatible message/response shape with Azure API-key authentication; the gateway targets `/openai/v1/chat/completions`, sends the key in `api-key`, uses `max_completion_tokens`, and sets the configured deployment name as `model`. See Microsoft's [Azure OpenAI chat REST reference](https://learn.microsoft.com/en-us/rest/api/microsoft-foundry/azureopenai/chat) and [endpoint documentation](https://learn.microsoft.com/en-us/azure/ai-foundry/model-inference/concepts/endpoints?tabs=python). Confirm the approved endpoint/deployment and data boundary before enabling calls; a separate SDK adapter remains unnecessary unless the approved endpoint does not support v1 compatibility.
 
 ### Configuration shape
 
@@ -169,6 +169,8 @@ LLM_ARTIFACT_RETENTION_APPROVED=false
 LLM_BASE_URL=https://gateway.example.invalid/v1
 LLM_API_KEY=replace-with-secret
 LLM_MODEL=replace-with-approved-model
+# For azure_openai, set LLM_BASE_URL to https://<resource>.openai.azure.com/openai/v1
+# and LLM_MODEL to the deployment name; live calls remain gated on both approvals above.
 LLM_TIMEOUT_SECONDS=30
 LLM_MAX_RETRIES=2
 LLM_MAX_OUTPUT_TOKENS=1200

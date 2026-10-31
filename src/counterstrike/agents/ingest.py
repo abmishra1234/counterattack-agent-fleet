@@ -59,6 +59,7 @@ def ingest_agent(
             {
                 "agent": "ingest",
                 "source_id": feed_batch.source_id,
+                "source_status": "success",
                 "fetched_at": feed_batch.fetched_at.isoformat(),
                 "advisories": len(advisories),
             }

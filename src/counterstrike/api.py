@@ -78,6 +78,27 @@ AUDIT_QUERY_VALUE_PATTERNS = {
 }
 AUDIT_QUERY_VALUE_OMITTED = frozenset({"search", "owner", "service", "actor_id"})
 AUDIT_QUERY_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+SOURCE_POLL_STATUSES = frozenset({"success", "partial", "failure", "skipped", "unknown"})
+SourcePollStatus = Literal["success", "partial", "failure", "skipped", "unknown"]
+LLMCallOutcome = Literal["succeeded", "failed", "unknown", "pending"]
+
+
+def _safe_source_status(value: Any) -> SourcePollStatus | None:
+    if value is None:
+        return None
+    status = str(value).lower()[:24]
+    return status if status in SOURCE_POLL_STATUSES else "unknown"
+
+
+def _safe_run_trace_value(key: str, value: Any) -> Any:
+    if value is None:
+        return None
+    limits = {"source_id": 100, "source_error_code": 100, "fetched_at": 40}
+    if key == "source_status":
+        return _safe_source_status(value)
+    if key in limits:
+        return str(value)[: limits[key]]
+    return value
 
 
 def _safe_audit_query_parameters(query_params):
@@ -152,10 +173,10 @@ class RunTraceItem(BaseModel):
 
     agent: str | None = None
     ms: float | None = None
-    source_id: str | None = None
-    source_status: str | None = None
-    source_error_code: str | None = None
-    fetched_at: str | None = None
+    source_id: str | None = Field(default=None, max_length=100)
+    source_status: SourcePollStatus | None = None
+    source_error_code: str | None = Field(default=None, max_length=100)
+    fetched_at: str | None = Field(default=None, max_length=40)
     advisories: int | None = None
     assets: int | None = None
     matches: int | None = None
@@ -322,6 +343,13 @@ class ReviewSourceEvidence(BaseModel):
     content_hash: str | None = None
 
 
+class ReviewSourceStatus(BaseModel):
+    source_id: str | None = Field(default=None, max_length=100)
+    status: SourcePollStatus | None = None
+    error_code: str | None = Field(default=None, max_length=100)
+    fetched_at: str | None = Field(default=None, max_length=40)
+
+
 class SourceReference(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -374,6 +402,7 @@ class ReviewListItem(BaseModel):
     stage: str
     reason: str
     source_evidence: ReviewSourceEvidence
+    source_statuses: list[ReviewSourceStatus]
     source_references: list[SourceReference]
     candidate_matches: list[MatchEvidenceItem]
     candidate_matches_truncated: bool
@@ -1075,7 +1104,8 @@ def create_app(settings=None):
         actor_id,
         advisory_id,
         prompt_version,
-        outcome,
+        currency,
+        outcome: LLMCallOutcome | None,
     ):
         conditions = []
         if since:
@@ -1102,6 +1132,7 @@ def create_app(settings=None):
             (LLMCall.actor_id, actor_id),
             (LLMCall.advisory_id, advisory_id),
             (LLMCall.prompt_version, prompt_version),
+            (LLMCall.cost_currency, currency),
             (LLMCall.outcome, outcome),
         ):
             if value:
@@ -1314,7 +1345,7 @@ def create_app(settings=None):
         trace = summary.get("trace", [])
         safe_trace = [
             {
-                key: item[key]
+                key: _safe_run_trace_value(key, item[key])
                 for key in (
                     "agent",
                     "source_id",
@@ -1365,6 +1396,17 @@ def create_app(settings=None):
             .offset(offset)
         ).all()
         case_ids = [item.id for item in cases]
+        run_ids = {item.run_id for item in cases}
+        runs = (
+            {
+                item.id: item
+                for item in session.scalars(
+                    select(RunRecord).where(RunRecord.id.in_(run_ids))
+                ).all()
+            }
+            if run_ids
+            else {}
+        )
         advisory_ids = {item.advisory_id for item in cases}
         advisories = (
             {
@@ -1406,6 +1448,29 @@ def create_app(settings=None):
                     bucket.append(match_evidence_item(match_record, asset_record))
         items = []
         for review_case in cases:
+            run = runs.get(review_case.run_id)
+            run_trace = (run.summary or {}).get("trace", []) if run else []
+            source_statuses = [
+                {
+                    "source_id": str(trace_item["source_id"])[:100]
+                    if trace_item.get("source_id") is not None
+                    else None,
+                    "status": _safe_source_status(trace_item.get("source_status")),
+                    "error_code": str(trace_item["source_error_code"])[:100]
+                    if trace_item.get("source_error_code") is not None
+                    else None,
+                    "fetched_at": str(trace_item["fetched_at"])[:40]
+                    if trace_item.get("fetched_at") is not None
+                    else None,
+                }
+                for trace_item in run_trace
+                if isinstance(trace_item, dict)
+                and (
+                    trace_item.get("source_id")
+                    or trace_item.get("source_status")
+                    or trace_item.get("source_error_code")
+                )
+            ][:12]
             advisory = advisories.get(review_case.advisory_id)
             payload = (advisory.normalized_payload or {}) if advisory else {}
             source_evidence = (
@@ -1430,6 +1495,7 @@ def create_app(settings=None):
                     "stage": review_case.stage,
                     "reason": review_case.reason,
                     "source_evidence": source_evidence,
+                    "source_statuses": source_statuses,
                     "source_references": (advisory.source_references or []) if advisory else [],
                     "candidate_matches": candidate_matches.get(
                         (review_case.run_id, review_case.advisory_id), []
@@ -2138,7 +2204,8 @@ def create_app(settings=None):
         actor_id: str | None = Query(default=None, max_length=200),
         advisory_id: str | None = Query(default=None, max_length=80),
         prompt_version: str | None = Query(default=None, max_length=100),
-        outcome: str | None = Query(default=None, max_length=32),
+        currency: str | None = Query(default=None, pattern="^[A-Z]{3}$"),
+        outcome: LLMCallOutcome | None = Query(default=None),
         limit: int = Query(default=100, ge=1, le=1000),
         offset: int = Query(default=0, ge=0, le=1000000),
         session=Depends(db_session),
@@ -2155,6 +2222,7 @@ def create_app(settings=None):
             actor_id,
             advisory_id,
             prompt_version,
+            currency,
             outcome,
         )
         day_timestamp = LLMCall.started_at
@@ -2290,7 +2358,8 @@ def create_app(settings=None):
         actor_id: str | None = Query(default=None, max_length=200),
         advisory_id: str | None = Query(default=None, max_length=80),
         prompt_version: str | None = Query(default=None, max_length=100),
-        outcome: str | None = Query(default=None, max_length=32),
+        currency: str | None = Query(default=None, pattern="^[A-Z]{3}$"),
+        outcome: LLMCallOutcome | None = Query(default=None),
         limit: int = Query(default=25, ge=1, le=100),
         offset: int = Query(default=0, ge=0, le=1000000),
         session=Depends(db_session),
@@ -2307,6 +2376,7 @@ def create_app(settings=None):
             actor_id,
             advisory_id,
             prompt_version,
+            currency,
             outcome,
         )
         stats = session.execute(
