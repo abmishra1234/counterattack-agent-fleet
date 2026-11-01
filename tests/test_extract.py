@@ -67,3 +67,43 @@ def test_non_json_output_is_routed_not_crashed(base_state):
     out = extract_agent(base_state, BrokenLLM())
     assert all(e.method == "structured" for e in out["extracted"])
     assert any("schema" in h.reason for h in out["needs_human"])
+
+
+def test_feed_products_are_mapped_without_the_llm(base_state):
+    from counterstrike.models import Advisory
+
+    state = dict(base_state)
+    state["advisories"] = [
+        Advisory(
+            id="CVE-2099-1000",
+            source="nvd",
+            published="2099-01-01",
+            title="t",
+            cvss=7.0,
+            structured={
+                "products": [
+                    {
+                        "product": "requests",
+                        "affected": "<2.32.0",
+                        "fixed": "2.32.0",
+                        "origin": "osv",
+                    },
+                    {"product": "not-in-inventory", "affected": "<1.0a-bad!", "origin": "nvd"},
+                    {"product": "openssl", "affected": "<1.1.1w-bad!", "origin": "nvd"},
+                ]
+            },
+        )
+    ]
+
+    class NoCallLLM:
+        name = "no-call"
+
+        def complete(self, *args, **kwargs):
+            raise AssertionError("structured feed data must not reach the LLM")
+
+    out = extract_agent(state, NoCallLLM())
+    (advisory,) = out["extracted"]
+    assert [(p.product, p.fixed_version) for p in advisory.products] == [("requests", "2.32.0")]
+    assert advisory.evidence == ["structured feed record (nvd, osv)"]
+    # Unparseable ranges reach an analyst only for products the inventory runs.
+    assert [h.reason for h in out["needs_human"]] == ["invalid specifier '<1.1.1w-bad!'"]

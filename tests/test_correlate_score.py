@@ -114,3 +114,24 @@ def test_band_boundaries_are_inclusive():
 def test_score_never_negative():
     total, prio, _, _ = score(_adv(0.0), _asset(criticality="low"))
     assert total == 0.0 and prio == "P4"
+
+
+def test_disjoint_feed_ranges_match_and_use_the_matched_fix():
+    advisory = _adv(9.0).model_copy(
+        update={
+            "products": [
+                AffectedProduct(product="c", affected=">=1.0,<1.2.5 || >=2.0,<2.0.3"),
+            ]
+        }
+    )
+    assets = [
+        _asset(asset_id="OLD", version="1.1"),
+        _asset(asset_id="NEW", version="2.0.1"),
+        _asset(asset_id="SAFE", version="1.5"),
+    ]
+    result = correlate_agent({"extracted": [advisory], "inventory": assets})
+    by_asset = {m.asset_id: m for m in result["matches"]}
+    assert (by_asset["OLD"].outcome, by_asset["OLD"].fixed_version) == ("affected", "1.2.5")
+    assert (by_asset["NEW"].outcome, by_asset["NEW"].fixed_version) == ("affected", "2.0.3")
+    assert by_asset["SAFE"].outcome == "not_affected"
+    assert result["needs_human"] == []

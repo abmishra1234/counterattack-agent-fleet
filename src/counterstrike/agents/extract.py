@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from counterstrike.guards import detect_injection, extraction_is_grounded, wrap_untrusted
 from counterstrike.llm import LLMPort
 from counterstrike.models import AffectedProduct, ExtractedAdvisory, FleetState, NeedsHuman
-from counterstrike.versions import parse_spec
+from counterstrike.versions import parse_ranges
 
 PROMPT_VERSION = "extract_v1"
 logger = logging.getLogger("counterstrike.agent.extract")
@@ -59,33 +59,41 @@ def extract_agent(state: FleetState, llm: LLMPort) -> dict:
             )
             continue
         if adv.structured:
-            s = adv.structured
-            product = _normalise(s["product"], aliases)
-            if parse_spec(s["affected"]) is None:
-                human.append(
-                    NeedsHuman(
-                        advisory_id=adv.id,
-                        stage="extract",
-                        reason=f"invalid specifier {s['affected']!r}",
+            # Fixtures carry one product; NVD CPE / OSV mapping carries {"products": [...]}.
+            records = adv.structured.get("products", [adv.structured])
+            structured_products: list[AffectedProduct] = []
+            for s in records:
+                product = _normalise(s["product"], aliases)
+                if parse_ranges(s["affected"]) is None:
+                    # A feed lists many products we do not run; only ours need an analyst.
+                    if len(records) == 1 or product in components:
+                        human.append(
+                            NeedsHuman(
+                                advisory_id=adv.id,
+                                stage="extract",
+                                reason=f"invalid specifier {s['affected'][:200]!r}",
+                            )
+                        )
+                    continue
+                structured_products.append(
+                    AffectedProduct(
+                        product=product, affected=s["affected"], fixed_version=s.get("fixed")
                     )
                 )
-                continue
-            extracted.append(
-                ExtractedAdvisory(
-                    advisory_id=adv.id,
-                    title=adv.title,
-                    cvss=adv.cvss,
-                    in_kev=(adv.id in kev) if kev_complete else None,
-                    products=[
-                        AffectedProduct(
-                            product=product, affected=s["affected"], fixed_version=s.get("fixed")
-                        )
-                    ],
-                    method="structured",
-                    evidence=[f"structured feed record ({adv.source})"],
-                    suspected_injection=injection,
+            if structured_products:
+                origins = sorted({str(s.get("origin", adv.source)) for s in records})
+                extracted.append(
+                    ExtractedAdvisory(
+                        advisory_id=adv.id,
+                        title=adv.title,
+                        cvss=adv.cvss,
+                        in_kev=(adv.id in kev) if kev_complete else None,
+                        products=structured_products,
+                        method="structured",
+                        evidence=[f"structured feed record ({', '.join(origins)})"],
+                        suspected_injection=injection,
+                    )
                 )
-            )
             continue
 
         user = (
@@ -153,7 +161,7 @@ def extract_agent(state: FleetState, llm: LLMPort) -> dict:
             ok, why = extraction_is_grounded(
                 adv.text, p.product, p.affected, p.fixed_version, set(components)
             )
-            if ok and parse_spec(p.affected) is not None:
+            if ok and parse_ranges(p.affected) is not None:
                 grounded.append(p)
             else:
                 human.append(

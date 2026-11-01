@@ -22,3 +22,15 @@ def test_inclusive_upper_bound():
 
 def test_invalid_specifier_returns_none():
     assert parse_spec("3.0.0 through 3.0.7") is None
+
+
+def test_range_unions_and_matched_fix():
+    from counterstrike.versions import exclusive_upper_bound, matching_range, parse_ranges
+
+    ranges = parse_ranges(">=2.0,<2.12.2 || >=2.13.0,<2.17.1")
+    assert len(ranges) == 2
+    assert exclusive_upper_bound(matching_range(Version("2.14.0"), ranges)) == "2.17.1"
+    assert matching_range(Version("2.12.5"), ranges) is None
+    assert parse_ranges("<1 ||") is None
+    assert parse_ranges("<1 || nonsense") is None
+    assert exclusive_upper_bound(parse_spec("<=1.4")) is None

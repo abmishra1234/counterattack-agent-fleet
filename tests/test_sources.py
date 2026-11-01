@@ -204,3 +204,134 @@ def test_nvd_timestamps_require_timezone():
     with pytest.raises(ValueError, match="timezone"):
         sources._iso_millis(datetime(2020, 1, 1))
     assert sources._iso_millis(datetime(2020, 1, 1, tzinfo=timezone.utc)).endswith("Z")
+
+
+def test_nvd_cpe_matches_become_version_ranges():
+    cve = {
+        "configurations": [
+            {
+                "nodes": [
+                    {
+                        "cpeMatch": [
+                            {
+                                "vulnerable": True,
+                                "criteria": "cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*",
+                                "versionStartIncluding": "2.0.0",
+                                "versionEndExcluding": "2.12.2",
+                            },
+                            {
+                                "vulnerable": True,
+                                "criteria": "cpe:2.3:a:apache:log4j:*:*:*:*:*:*:*:*",
+                                "versionStartIncluding": "2.13.0",
+                                "versionEndExcluding": "2.17.1",
+                            },
+                            {"vulnerable": True, "criteria": "cpe:2.3:a:acme:widget:1.4:*"},
+                            {"vulnerable": True, "criteria": "cpe:2.3:a:acme:unpatched:*:*"},
+                            {"vulnerable": True, "criteria": "cpe:2.3:a:acme:na:-:*"},
+                            {"vulnerable": False, "criteria": "cpe:2.3:o:linux:kernel:*:*"},
+                            {"vulnerable": True, "criteria": "cpe:2.3:h:acme:router:1.0:*"},
+                            {"vulnerable": True, "criteria": r"cpe:2.3:a:node\.js:node\.js:*:*"},
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+    products = {p["product"]: p for p in sources._nvd_affected_products(cve)}
+    assert set(products) == {"log4j", "widget", "unpatched", "node.js"}
+    assert products["log4j"]["affected"] == ">=2.0.0,<2.12.2 || >=2.13.0,<2.17.1"
+    assert products["log4j"]["vendor"] == "apache"
+    assert products["log4j"]["fixed"] is None  # the fix depends on the matched range
+    assert products["widget"]["affected"] == "==1.4"
+    assert products["unpatched"]["affected"] == ">=0"
+    assert all(p["origin"] == "nvd" for p in products.values())
+    assert sources._nvd_affected_products({"configurations": "bad"}) == []
+
+
+def test_osv_events_become_version_ranges():
+    record = {
+        "affected": [
+            {
+                "package": {"ecosystem": "PyPI", "name": "Jinja2"},
+                "ranges": [
+                    {"type": "GIT", "events": [{"introduced": "abc"}, {"fixed": "def"}]},
+                    {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "3.1.3"}]},
+                ],
+            },
+            {
+                "package": {"ecosystem": "Maven", "name": "org.example:core-lib"},
+                "ranges": [
+                    {
+                        "type": "ECOSYSTEM",
+                        "events": [
+                            {"introduced": "1.0"},
+                            {"last_affected": "1.4"},
+                            {"introduced": "2.0"},
+                        ],
+                    }
+                ],
+            },
+            {"package": {"name": "listed"}, "versions": ["1.0", "1.1"]},
+            {"package": "bad"},
+        ]
+    }
+    products = {p["product"]: p for p in sources._osv_affected_products(record)}
+    assert products["jinja2"]["affected"] == "<3.1.3"
+    assert products["jinja2"]["fixed"] == "3.1.3"
+    assert products["core-lib"]["affected"] == ">=1.0,<=1.4 || >=2.0"
+    assert products["listed"]["affected"] == "==1.0 || ==1.1"
+
+
+def test_osv_ranges_fill_advisories_nvd_left_without_products(monkeypatch):
+    client = FeedClient()
+    original = client.get_json
+
+    def payloads(source_id, url, **kwargs):
+        payload = original(source_id, url, **kwargs)
+        if source_id == "cisa_kev":
+            payload["vulnerabilities"] = []  # OSV must not depend on KEV membership
+        if source_id == "osv":
+            payload["affected"] = [
+                {
+                    "package": {"name": "requests"},
+                    "ranges": [
+                        {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "2.32.0"}]}
+                    ],
+                }
+            ]
+        return payload
+
+    client.get_json = payloads
+    monkeypatch.setattr(sources, "PublicSourceHTTPClient", lambda **kwargs: client)
+    advisory = sources.fetch_public_feed_bundle().advisories[0]
+    assert advisory.structured == {
+        "products": [
+            {
+                "product": "requests",
+                "vendor": None,
+                "affected": "<2.32.0",
+                "fixed": "2.32.0",
+                "origin": "osv",
+            }
+        ]
+    }
+    osv_trace = next(
+        item
+        for item in sources.fetch_public_feed_bundle(max_osv_lookups=0).trace
+        if item["agent"] == "source_osv"
+    )
+    assert osv_trace["lookups_deferred"] == 1
+
+
+def test_first_source_keeps_authority_over_a_product():
+    nvd = [{"product": "a", "affected": "<2", "fixed": "2", "origin": "nvd"}]
+    osv = [
+        {"product": "a", "affected": "<3", "fixed": "3", "origin": "osv"},
+        {"product": "b", "affected": "<1", "fixed": "1", "origin": "osv"},
+    ]
+    merged = sources._merge_structured({"products": nvd}, osv)
+    assert [(p["product"], p["origin"]) for p in merged["products"]] == [
+        ("a", "nvd"),
+        ("b", "osv"),
+    ]
+    assert sources._merge_structured(None, []) is None

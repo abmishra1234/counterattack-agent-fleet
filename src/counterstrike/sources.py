@@ -232,6 +232,146 @@ def _nvd_references(cve: dict[str, Any]) -> list[dict[str, Any]]:
     return normalized
 
 
+_MAX_STRUCTURED_PRODUCTS = 50
+_MAX_RANGES_PER_PRODUCT = 20
+
+
+def _structured_products(
+    ranges_by_product: dict[tuple[str, str | None], list[tuple[str, str | None]]], origin: str
+) -> list[dict[str, Any]]:
+    """Collapse (range, fixed) pairs per product into one '||' union the correlator can read.
+
+    A fixed version is kept only for a single range; with several disjoint ranges the
+    correlator derives the fix from whichever range the installed version falls in.
+    """
+    products = []
+    for (product, vendor), pairs in list(ranges_by_product.items())[:_MAX_STRUCTURED_PRODUCTS]:
+        unique = list(dict.fromkeys(pairs))[:_MAX_RANGES_PER_PRODUCT]
+        products.append(
+            {
+                "product": product,
+                "vendor": vendor,
+                "affected": " || ".join(spec for spec, _ in unique),
+                "fixed": unique[0][1] if len(unique) == 1 else None,
+                "origin": origin,
+            }
+        )
+    return products
+
+
+def _unescape_cpe(value: str) -> str:
+    return re.sub(r"\\(.)", r"\1", value)
+
+
+def _nvd_affected_products(cve: dict[str, Any]) -> list[dict[str, Any]]:
+    """Map vulnerable NVD CPE matches to product names and version ranges.
+
+    Bounds keep their NVD meaning: versionEndExcluding is the first fixed release. A wildcard
+    version without bounds means every version is affected; '-' (not applicable) is skipped.
+    """
+    ranges: dict[tuple[str, str | None], list[tuple[str, str | None]]] = {}
+    configurations = cve.get("configurations")
+    for config in configurations if isinstance(configurations, list) else []:
+        nodes = config.get("nodes") if isinstance(config, dict) else None
+        for node in nodes if isinstance(nodes, list) else []:
+            matches = node.get("cpeMatch") if isinstance(node, dict) else None
+            for match in matches if isinstance(matches, list) else []:
+                if not isinstance(match, dict) or match.get("vulnerable") is not True:
+                    continue
+                criteria = match.get("criteria")
+                if not isinstance(criteria, str) or len(criteria) > 500:
+                    continue
+                parts = re.split(r"(?<!\\):", criteria)
+                if len(parts) < 6 or parts[0] != "cpe" or parts[2] not in {"a", "o"}:
+                    continue
+                vendor, product, version = (_unescape_cpe(p).lower() for p in parts[3:6])
+                if not product or product in {"*", "-"} or version == "-":
+                    continue
+                bounds = [
+                    f"{op}{match[key]}"
+                    for key, op in (
+                        ("versionStartIncluding", ">="),
+                        ("versionStartExcluding", ">"),
+                        ("versionEndIncluding", "<="),
+                        ("versionEndExcluding", "<"),
+                    )
+                    if isinstance(match.get(key), str) and match[key].strip()
+                ]
+                if bounds:
+                    spec = ",".join(bounds)
+                elif version != "*":
+                    spec = f"=={version}"
+                else:
+                    spec = ">=0"
+                fixed = match.get("versionEndExcluding")
+                ranges.setdefault((product, vendor if vendor != "*" else None), []).append(
+                    (spec, fixed if isinstance(fixed, str) else None)
+                )
+    return _structured_products(ranges, "nvd")
+
+
+def _osv_affected_products(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """Map OSV affected packages and ECOSYSTEM/SEMVER range events to version ranges."""
+    ranges: dict[tuple[str, str | None], list[tuple[str, str | None]]] = {}
+    affected = record.get("affected")
+    for item in affected if isinstance(affected, list) else []:
+        package = item.get("package") if isinstance(item, dict) else None
+        name = package.get("name") if isinstance(package, dict) else None
+        if not isinstance(name, str) or not name.strip() or len(name) > 200:
+            continue
+        # Maven names are "group:artifact"; inventories record the artifact.
+        product = name.strip().lower().rsplit(":", 1)[-1]
+        key = (product, None)
+        found = False
+        for range_item in item.get("ranges") or []:
+            if not isinstance(range_item, dict) or range_item.get("type") not in {
+                "ECOSYSTEM",
+                "SEMVER",
+            }:
+                continue
+            lower: str | None = None
+            open_interval = False
+            for event in range_item.get("events") or []:
+                if not isinstance(event, dict):
+                    continue
+                if isinstance(event.get("introduced"), str):
+                    introduced = event["introduced"]
+                    lower = None if introduced == "0" else introduced
+                    open_interval = True
+                elif open_interval and isinstance(event.get("fixed"), str):
+                    spec = ",".join(filter(None, (lower and f">={lower}", f"<{event['fixed']}")))
+                    ranges.setdefault(key, []).append((spec, event["fixed"]))
+                    open_interval, found = False, True
+                elif open_interval and isinstance(event.get("last_affected"), str):
+                    spec = ",".join(
+                        filter(None, (lower and f">={lower}", f"<={event['last_affected']}"))
+                    )
+                    ranges.setdefault(key, []).append((spec, None))
+                    open_interval, found = False, True
+            if open_interval:
+                ranges.setdefault(key, []).append((f">={lower}" if lower else ">=0", None))
+                found = True
+        if not found:
+            versions = [v for v in item.get("versions") or [] if isinstance(v, str) and v]
+            for version in versions[:_MAX_RANGES_PER_PRODUCT]:
+                ranges.setdefault(key, []).append((f"=={version}", None))
+    return _structured_products(ranges, "osv")
+
+
+def _merge_structured(
+    current: dict[str, Any] | None, extra: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Add products from another source that the advisory does not already describe.
+
+    The first source keeps authority over a product it lists, so two sources never produce
+    conflicting ranges for the same product within one advisory.
+    """
+    products = list((current or {}).get("products", []))
+    known = {item["product"] for item in products}
+    products.extend(item for item in extra if item["product"] not in known)
+    return {"products": products[:_MAX_STRUCTURED_PRODUCTS]} if products else current
+
+
 def _iso_millis(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("NVD polling timestamps must be timezone-aware")
@@ -326,6 +466,7 @@ class NVDFeedAdapter:
                     published=published,
                     title=f"{cve_id}: {description[:400]}" if description else cve_id,
                     cvss=_nvd_cvss(cve),
+                    structured=_merge_structured(None, _nvd_affected_products(cve)),
                     text=description[:20_000],
                 )
             )
@@ -513,10 +654,13 @@ def fetch_public_feed_bundle(
     epss_enabled: bool = False,
     max_nvd_pages: int = 5,
     max_epss_requests: int = 34,
+    max_osv_lookups: int = 100,
 ) -> PublicFeedBundle:
     """Fetch a bounded NVD page window and independent KEV/OSV enrichments."""
     if not 1 <= max_nvd_pages <= 20:
         raise ValueError("NVD page bound must be between 1 and 20")
+    if not 0 <= max_osv_lookups <= 500:
+        raise ValueError("OSV lookup bound must be between 0 and 500")
     if not 1 <= max_epss_requests <= 50:
         raise ValueError("EPSS request bound must be between 1 and 50")
     client = PublicSourceHTTPClient(timeout_seconds=timeout_seconds)
@@ -669,8 +813,19 @@ def fetch_public_feed_bundle(
                 }
             )
 
-        # OSV adds independent descriptions for KEV CVEs in the current NVD window.
-        osv_ids = tuple(dict.fromkeys(a.id for a in advisories if a.id in set(kev_ids)))
+        # OSV adds independent descriptions and package version ranges. KEV CVEs come first,
+        # then CVEs NVD published without CPE ranges; each lookup is one request, so it is bounded.
+        kev_set = set(kev_ids)
+        osv_candidates = list(
+            dict.fromkeys(
+                [
+                    *(a.id for a in advisories if a.id in kev_set),
+                    *(a.id for a in advisories if not a.structured),
+                ]
+            )
+        )
+        osv_ids = tuple(osv_candidates[:max_osv_lookups])
+        osv_deferred = len(osv_candidates) - len(osv_ids)
         osv_records: list[dict[str, Any]] = []
         osv_error = None
         if osv_ids:
@@ -738,7 +893,12 @@ def fetch_public_feed_bundle(
             )
             enriched.append(
                 advisory.model_copy(
-                    update={"text": f"{advisory.text}\n\nOSV enrichment:\n{extra}"[:20_000]}
+                    update={
+                        "text": f"{advisory.text}\n\nOSV enrichment:\n{extra}"[:20_000],
+                        "structured": _merge_structured(
+                            advisory.structured, _osv_affected_products(record)
+                        ),
+                    }
                 )
             )
         advisories = enriched
@@ -761,6 +921,7 @@ def fetch_public_feed_bundle(
                 "fetched_at": osv_fetched_at,
                 "source_error_code": osv_error,
                 "advisories": osv_count,
+                "lookups_deferred": osv_deferred,
             }
         )
 

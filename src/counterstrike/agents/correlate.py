@@ -5,7 +5,12 @@ from __future__ import annotations
 import time
 
 from counterstrike.models import FleetState, Match, NeedsHuman
-from counterstrike.versions import is_affected, parse_spec, tolerant_version
+from counterstrike.versions import (
+    exclusive_upper_bound,
+    matching_range,
+    parse_ranges,
+    tolerant_version,
+)
 
 
 def _merge_candidate(previous: Match | None, candidate: Match) -> Match:
@@ -64,8 +69,8 @@ def correlate_agent(state: FleetState) -> dict:
 
     for adv in state["extracted"]:
         for prod in adv.products:
-            spec = parse_spec(prod.affected)
-            if spec is None:
+            ranges = parse_ranges(prod.affected)
+            if ranges is None:
                 matching_assets = [
                     asset
                     for asset in state["inventory"]
@@ -135,7 +140,12 @@ def correlate_agent(state: FleetState) -> dict:
                         )
                     )
                     continue
-                affected = is_affected(version, spec)
+                matched = matching_range(version, ranges)
+                affected = matched is not None
+                fixed_version = prod.fixed_version
+                if len(ranges) > 1:
+                    # Each disjoint range has its own fix; only the matched range's bound applies.
+                    fixed_version = exclusive_upper_bound(matched) if matched else None
                 outcome = "possible_match" if note else "affected" if affected else "not_affected"
                 evidence = [
                     (
@@ -166,7 +176,7 @@ def correlate_agent(state: FleetState) -> dict:
                     component=asset.component,
                     installed_version=asset.version,
                     affected=prod.affected,
-                    fixed_version=prod.fixed_version,
+                    fixed_version=fixed_version,
                     comparator="pep440_tolerant" if note else "pep440",
                     outcome=outcome,
                     confidence=None if note else 1.0,
