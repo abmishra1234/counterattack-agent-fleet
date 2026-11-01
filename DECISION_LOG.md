@@ -1,6 +1,6 @@
 # Decision Log — Counterstrike Lite (sample solution)
 
-Status values: **Accepted** (built on), **Provisional** (holds for the assessment; revisit for production).
+Status values: **Accepted** (built on), **Provisional** (holds for the assessment; revisit for production), **Proposed** (awaiting mentor confirmation; not yet built on).
 Each entry: context → options → decision → consequences → revisit trigger.
 
 | ID | Decision | Status |
@@ -17,6 +17,10 @@ Each entry: context → options → decision → consequences → revisit trigge
 | DL-10 | Synthetic, offline fixtures (CVE-2099-xxxx) | Accepted |
 | DL-11 | Gold-label eval as a CI release gate; live-LLM run is manual | Accepted |
 | DL-12 | Typed shared state with append-only lists | Accepted |
+| DL-13 | Privileged LLM artifact reads | Accepted |
+| DL-14 | Audit event review API | Accepted |
+| DL-15 | Local Docker API access boundary | Accepted |
+| DL-16 | Prototype scope decisions D1–D14 (T-02) | Proposed |
 
 ---
 
@@ -126,6 +130,19 @@ Bands: **P1 ≥ 12 (24 h)**, **P2 ≥ 9 (7 d)**, **P3 ≥ 6 (30 d)**, **P4 < 6 (
 **Decision.** Compose publishes the API only on host `127.0.0.1`, keeps PostgreSQL private, and allowlists only the configured private Compose bridge CIDR for development/test role checks. Production settings reject `API_TRUSTED_LOCAL_CLIENT_CIDRS`; hosted deployment remains blocked on OIDC/SSO and network policy.
 
 **Status.** Implemented in local Compose/configuration; Docker runtime and network-boundary acceptance remain pending.
+
+## DL-16 — Prototype scope decisions (T-02)
+**Context.** The requirement asks the mentor to confirm inventory, feeds and LLM by 2 November 2026 so the prototype scope can be frozen. Tracker items PLN-02, PLN-03 and PLN-04 depend on the same answers.
+
+**Proposal.** The defaults in [planning/T02_MENTOR_DECISION_BRIEF.md](planning/T02_MENTOR_DECISION_BRIEF.md), rows D1–D14. Most restate the requirement's own assumptions (Q1–Q16). D5 (30-day retention), D8 (EPSS shown but not scored), D10 (P1 within 5 minutes of ingestion) and D12 (baseline from about 20 recent CVEs) are new values.
+
+**Status.** Proposed. When the mentor replies, record each row's outcome below and change the index status to Accepted (or Provisional where a row is accepted only for the prototype).
+
+| Row | Outcome | Date | Notes |
+|---|---|---|---|
+| D1–D14 | Awaiting mentor | — | Brief sent: *date to fill* |
+
+**Consequences once accepted.** D1, D2 and D4 unblock live feed polling and the CI LLM smoke test. D10 and D11 fix the pass marks for AC-6 and AC-2. Live LLM calls and real alert delivery stay off until D4, D5 and D9 are accepted.
 
 ## DL-09 — Alert delivery
 **Decision.** Write `out/outbox/<owner>.md` and `out/alerts.json`. No email, Slack or ticket creation.
