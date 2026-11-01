@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from counterstrike.guards import summary_is_grounded
-from counterstrike.versions import spec_versions
+from counterstrike.versions import spec_versions, versions_in
 
 
 def evaluate(out_dir: str | Path, gold_path: str | Path) -> dict:
@@ -30,8 +30,12 @@ def evaluate(out_dir: str | Path, gold_path: str | Path) -> dict:
         if not summary_is_grounded(
             a["summary"],
             {a["installed_version"], a["fixed_version"] or ""}
+            | {v for e in a["evidence"] if e.startswith("affected range") for v in spec_versions(e)}
             | {
-                v for e in a["evidence"] if e.startswith("affected range") for v in spec_versions(e)
+                v
+                for e in a["evidence"]
+                if e.startswith(("advisory title: ", "CVSS score: "))
+                for v in versions_in(e)
             },
         )
     ]

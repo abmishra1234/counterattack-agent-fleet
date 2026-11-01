@@ -158,7 +158,7 @@ class LegacyPreviewResponse(BaseModel):
     report: dict[str, Any]
     advisories: list[dict[str, Any]]
     inventory: list[dict[str, Any]]
-    kev: list[dict[str, Any]]
+    kev: dict[str, Any] | list[dict[str, Any] | str]
     last_run: str = Field(alias="lastRun")
 
 

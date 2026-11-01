@@ -14,6 +14,7 @@ def test_full_fleet_matches_gold(tmp_path, data_dir, gold):
     assert gate(metrics, 1.0, 1.0, 1.0) == []
     report = json.loads((tmp_path / "run_report.json").read_text())
     assert [t["agent"] for t in report["trace"]] == [
+        "fixture_feed",
         "ingest",
         "extract",
         "correlate",
@@ -28,6 +29,18 @@ def test_inputs_are_never_modified(tmp_path, data_dir):
     before = {p.name: p.read_bytes() for p in data_dir.glob("*.json")}
     run(data_dir, tmp_path, FakeLLM())
     assert before == {p.name: p.read_bytes() for p in data_dir.glob("*.json")}
+
+
+def test_evaluator_accepts_recorded_cvss_but_rejects_invented_versions(tmp_path, data_dir):
+    run(data_dir, tmp_path, FakeLLM())
+    path = tmp_path / "alerts.json"
+    alerts = json.loads(path.read_text())
+    assert all(any(e.startswith("CVSS score: ") for e in a["evidence"]) for a in alerts)
+    alerts[0]["summary"] += " Upgrade to 99.88.77."
+    path.write_text(json.dumps(alerts))
+    metrics = evaluate(tmp_path, data_dir / "gold" / "expected_alerts.json")
+    assert metrics["ungrounded_summaries"] == [alerts[0]["alert_id"]]
+    assert any("ungrounded" in failure for failure in gate(metrics, 1.0, 1.0, 1.0))
 
 
 def test_no_match_path_short_circuits_to_dispatch(tmp_path, data_dir):

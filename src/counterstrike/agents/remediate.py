@@ -315,6 +315,8 @@ def remediate_agent(state: FleetState, llm: LLMPort) -> dict:
         )
         evidence = [
             *adv.evidence,
+            f"advisory title: {adv.title}",
+            f"CVSS score: {adv.cvss:.1f}",
             f"inventory {asset.asset_id}: {s.component}=={s.installed_version}",
             f"affected range {s.affected}",
             *_impact_provenance_evidence(
