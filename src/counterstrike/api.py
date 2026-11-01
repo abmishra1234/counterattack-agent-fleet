@@ -14,15 +14,15 @@ from decimal import Decimal
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from fastapi.exceptions import RequestValidationError
-from fastapi.openapi.utils import get_openapi
-from fastapi.responses import JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import case, distinct, func, or_, select
-from sqlalchemy.exc import IntegrityError
-from starlette.exceptions import HTTPException as StarletteHTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query  # type: ignore
+from fastapi.exceptions import RequestValidationError  # type: ignore
+from fastapi.openapi.utils import get_openapi  # type: ignore
+from fastapi.responses import JSONResponse, Response  # type: ignore
+from fastapi.staticfiles import StaticFiles  # type: ignore
+from pydantic import BaseModel, ConfigDict, Field, field_validator  # type: ignore
+from sqlalchemy import case, distinct, func, literal, or_, select  # type: ignore
+from sqlalchemy.exc import IntegrityError  # type: ignore
+from starlette.exceptions import HTTPException as StarletteHTTPException  # type: ignore
 
 from counterstrike.audit import append_event, verify_chain
 from counterstrike.config import PROJECT_ROOT, load_settings
@@ -32,6 +32,7 @@ from counterstrike.db_models import (
     AdvisoryRecord,
     AlertRecord,
     AuditEvent,
+    FindingRecord,
     InventoryAsset,
     JobRecord,
     LLMAuditAccess,
@@ -530,6 +531,11 @@ class AlertListItem(BaseModel):
     summary: str
     sla_hours: int
     created_at: datetime
+    finding_id: str | None = None
+    finding_status: str | None = None
+    first_seen_at: datetime | None = None
+    last_seen_at: datetime | None = None
+    occurrences: int | None = None
 
 
 class AlertEPSSContext(BaseModel):
@@ -1056,8 +1062,20 @@ def create_app(settings=None):
             "summary": run_summary(record),
         }
 
-    def alert_item(record):
+    def alert_item(record, finding=None):
+        finding_fields = (
+            {
+                "finding_id": finding.id,
+                "finding_status": finding.status,
+                "first_seen_at": finding.first_seen_at,
+                "last_seen_at": finding.last_seen_at,
+                "occurrences": finding.occurrences,
+            }
+            if finding is not None
+            else {}
+        )
         return {
+            **finding_fields,
             "id": record.id,
             "run_id": record.run_id,
             "cve_id": record.cve_id,
@@ -1933,11 +1951,16 @@ def create_app(settings=None):
         service: str | None = Query(default=None, max_length=200),
         search: str | None = Query(default=None, max_length=200),
         since: datetime | None = Query(default=None),
+        run_id: str | None = Query(default=None, max_length=36),
         limit: int = Query(default=25, ge=1, le=100),
         offset: int = Query(default=0, ge=0, le=1000000),
         session=Depends(db_session),
     ):
+        # Without run_id, list one row per finding (its latest alert). With run_id, list
+        # that run's alert rows, which are the per-run history.
         conditions = []
+        if run_id:
+            conditions.append(AlertRecord.run_id == run_id)
         if priority:
             conditions.append(AlertRecord.priority == priority)
         if owner:
@@ -1961,22 +1984,31 @@ def create_app(settings=None):
                 else since.astimezone(timezone.utc)
             )
             conditions.append(AlertRecord.created_at >= since)
-        total = int(session.scalar(select(func.count(AlertRecord.id)).where(*conditions)) or 0)
+        if run_id:
+            count_query = select(func.count(AlertRecord.id))
+            rows_query = select(AlertRecord, literal(None).label("finding"))
+        else:
+            count_query = select(func.count(AlertRecord.id)).join(
+                FindingRecord, FindingRecord.latest_alert_id == AlertRecord.id
+            )
+            rows_query = select(AlertRecord, FindingRecord).join(
+                FindingRecord, FindingRecord.latest_alert_id == AlertRecord.id
+            )
+        total = int(session.scalar(count_query.where(*conditions)) or 0)
         priority_order = case(
             (AlertRecord.priority == "P1", 1),
             (AlertRecord.priority == "P2", 2),
             (AlertRecord.priority == "P3", 3),
             else_=4,
         )
-        records = session.scalars(
-            select(AlertRecord)
-            .where(*conditions)
+        records = session.execute(
+            rows_query.where(*conditions)
             .order_by(priority_order, AlertRecord.risk_score.desc(), AlertRecord.created_at.desc())
             .limit(limit)
             .offset(offset)
         ).all()
         return {
-            "items": [alert_item(item) for item in records],
+            "items": [alert_item(record, finding) for record, finding in records],
             "total": total,
             "limit": limit,
             "offset": offset,

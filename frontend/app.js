@@ -243,7 +243,7 @@ function alertRows(items) {
   return items.map((alert) => `
     <tr tabindex="0" role="button" aria-label="Open ${escapeHtml(alert.cve_id)} for ${escapeHtml(alert.service)}" data-alert-id="${escapeHtml(alert.alert_id)}">
       <td>${priorityBadge(alert.priority)}</td>
-      <td><a class="cve-link mono" href="#alert/${encodeURIComponent(alert.alert_id)}">${escapeHtml(alert.cve_id)}</a><div class="mono-label">${escapeHtml(alert.alert_id)}</div></td>
+      <td><a class="cve-link mono" href="#alert/${encodeURIComponent(alert.alert_id)}">${escapeHtml(alert.cve_id)}</a><div class="mono-label">${alert.occurrences ? `Seen in ${escapeHtml(alert.occurrences)} run${alert.occurrences === 1 ? '' : 's'} · first ${escapeHtml(niceDate(alert.first_seen_at))}` : escapeHtml(alert.alert_id)}</div></td>
       <td><div class="asset-cell"><span class="service-name">${escapeHtml(alert.component)}</span><small>v${escapeHtml(alert.installed_version)}</small></div></td>
       <td><div class="asset-cell"><span class="service-name">${escapeHtml(alert.service)}</span><small>${escapeHtml(alert.asset_id)}</small></div></td>
       <td><div class="owner-cell"><span class="owner-avatar">${escapeHtml((alert.owner || '??').slice(0, 2).toUpperCase())}</span><span class="owner-name">${escapeHtml(alert.owner)}</span></div></td>
@@ -252,7 +252,7 @@ function alertRows(items) {
 }
 
 function alertsTable(items, compact = false) {
-  return `<div class="table-wrap"><table><thead><tr><th>Priority</th><th>Advisory</th><th>Component</th><th>Service / asset</th><th>Owner</th><th>Assessment</th></tr></thead><tbody>${alertRows(items)}</tbody></table></div>${compact ? `<div class="table-foot"><span>Showing ${items.length} affected assets in this run</span><a href="#alerts" data-go="alerts">View all alerts <span class="arrow">→</span></a></div>` : `<div class="table-foot"><span>API-backed results · ${items.length} items</span><span>Sorted by priority and risk score</span></div>`}`;
+  return `<div class="table-wrap"><table><thead><tr><th>Priority</th><th>Advisory</th><th>Component</th><th>Service / asset</th><th>Owner</th><th>Assessment</th></tr></thead><tbody>${alertRows(items)}</tbody></table></div>${compact ? `<div class="table-foot"><span>Showing ${items.length} current findings</span><a href="#alerts" data-go="alerts">View all alerts <span class="arrow">→</span></a></div>` : `<div class="table-foot"><span>API-backed results · ${items.length} items</span><span>Sorted by priority and risk score</span></div>`}`;
 }
 
 function renderOverview() {
@@ -331,7 +331,7 @@ function renderAlerts() {
     const searchText = [alert.cve_id, alert.asset_id, alert.service, alert.component, alert.owner].join(' ').toLowerCase();
     return matchesPriority && matchesOwner && searchText.includes(query.trim().toLowerCase());
   });
-  app.innerHTML = `${pageHeading('WORKSPACE / ALERTS', 'Affected assets', 'Review each confirmed match, its priority and the evidence used by the latest run.', '<span class="feed-mode">LATEST RUN</span>')}
+  app.innerHTML = `${pageHeading('WORKSPACE / ALERTS', 'Affected assets', 'One row per affected asset and advisory, showing the evidence from the most recent run that found it.', '<span class="feed-mode">CURRENT FINDINGS</span>')}
     <div class="page-toolbar"><label class="searchbox"><span aria-hidden="true">⌕</span><input id="alert-search" type="search" placeholder="Search CVE, product, service or owner" value="${escapeHtml(query)}" aria-label="Search alerts"></label><select class="select-control" id="owner-filter" aria-label="Filter by owner"><option value="all">All owners</option>${[...new Set(model.alerts.map((a) => a.owner))].sort().map((owner) => `<option value="${escapeHtml(owner)}" ${ownerFilter === owner ? 'selected' : ''}>${escapeHtml(owner)}</option>`).join('')}</select><button class="button small" id="clear-filters">Clear filters</button></div>
     <div class="filter-chips" aria-label="Filter by priority">${['All', 'P1', 'P2', 'P3', 'P4'].map((p) => `<button class="filter-chip ${priorityFilter === p ? 'active' : ''}" data-priority="${p}">${p === 'All' ? 'All priorities' : p}<span class="chip-count">${p === 'All' ? model.alerts.length : model.alerts.filter((a) => a.priority === p).length}</span></button>`).join('')}</div>
     <article class="panel table-panel"><div class="panel-header"><div class="panel-title">Affected asset list</div><span class="table-caption" id="results-count">${items.length} results</span></div><div id="alerts-table">${alertsTable(items)}</div></article>`;

@@ -9,7 +9,7 @@ from sqlalchemy import select
 from counterstrike.audit import verify_chain
 from counterstrike.config import Settings
 from counterstrike.db import session_scope
-from counterstrike.db_models import AlertRecord, JobRecord, RunRecord
+from counterstrike.db_models import AlertRecord, FindingRecord, JobRecord, RunRecord
 
 
 def create_app(settings):
@@ -121,6 +121,39 @@ def test_findings_inventory_and_review_lifecycle(client, persisted_run, db_setti
     with session_scope(db_settings) as session:
         assert len(session.scalars(select(AlertRecord)).all()) == 5
         assert verify_chain(session) == (True, None)
+
+
+def test_repeated_runs_update_findings_instead_of_duplicating(client, persisted_run, db_settings):
+    from counterstrike.repositories import create_run, mark_run_started, persist_run_results
+
+    first_run_id, state = persisted_run
+    with session_scope(db_settings) as session:
+        finding = session.scalars(select(FindingRecord)).first()
+        finding.status = "resolved"
+        resolved_key = finding.finding_key
+        second = create_run(session, trigger_type="scheduled", actor_id=None, request_id="req-2")
+        mark_run_started(session, second.id)
+        persist_run_results(session, second.id, state, settings=db_settings)
+        second_run_id = second.id
+
+    alerts = client.get("/api/v1/alerts").json()
+    assert alerts["total"] == len(state["alerts"]) == 5
+    keys = {(item["cve_id"], item["asset_key"]) for item in alerts["items"]}
+    assert len(keys) == 5
+    for item in alerts["items"]:
+        assert item["occurrences"] == 2
+        assert item["run_id"] == second_run_id
+        assert item["first_seen_at"] <= item["last_seen_at"]
+    history = client.get("/api/v1/alerts", params={"run_id": first_run_id}).json()
+    assert history["total"] == 5
+    assert all(item["finding_id"] is None for item in history["items"])
+    with session_scope(db_settings) as session:
+        assert len(session.scalars(select(AlertRecord)).all()) == 10
+        findings = session.scalars(select(FindingRecord)).all()
+        assert len(findings) == 5
+        assert {item.first_run_id for item in findings} == {first_run_id}
+        reopened = next(item for item in findings if item.finding_key == resolved_key)
+        assert reopened.status == "open"
 
 
 @pytest.mark.parametrize("path", ["runs/missing", "alerts/missing", "llm/usage/missing"])

@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import select  # type: ignore
+from sqlalchemy.orm import Session  # type: ignore
 
 from counterstrike.db_models import AuditEvent, AuditStreamHead
 
@@ -57,9 +57,9 @@ def append_event(
     if head is None:
         dialect = session.get_bind().dialect.name
         if dialect == "postgresql":
-            from sqlalchemy.dialects.postgresql import insert
+            from sqlalchemy.dialects.postgresql import insert  # type: ignore
         elif dialect == "sqlite":
-            from sqlalchemy.dialects.sqlite import insert
+            from sqlalchemy.dialects.sqlite import insert  # type: ignore
         else:
             raise RuntimeError(f"Audit stream initialization is unsupported for {dialect}")
         session.execute(

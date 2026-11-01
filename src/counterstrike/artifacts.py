@@ -8,10 +8,10 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from cryptography.exceptions import InvalidTag  # type: ignore
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM  # type: ignore
+from sqlalchemy import select  # type: ignore
+from sqlalchemy.orm import Session  # type: ignore
 
 from counterstrike.audit import append_event
 from counterstrike.config import Settings, load_settings

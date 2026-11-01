@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -20,6 +20,7 @@ from counterstrike.db_models import (
     AdvisoryEnrichment,
     AdvisoryRecord,
     AlertRecord,
+    FindingRecord,
     InventoryAsset,
     InventorySnapshot,
     MatchRecord,
@@ -401,6 +402,7 @@ def persist_run_results(
     session.flush()
 
     score_details = {(item.advisory_id, item.asset_id): item for item in state.get("scored", [])}
+    seen_at = datetime.now(timezone.utc)
     for alert in state.get("alerts", []):
         pair = (alert.cve_id, alert.asset_id)
         match_row = matches_by_pair.get(pair)
@@ -439,6 +441,7 @@ def persist_run_results(
         )
         session.add(row)
         session.flush()
+        _upsert_finding(session, run=run, alert=row, seen_at=seen_at)
         if settings.outbox_enqueue_enabled:
             _enqueue_alert_delivery(session, run=run, alert=row, settings=settings)
 
@@ -494,6 +497,58 @@ def persist_run_results(
         policy_version=policy_version,
     )
     return run
+
+
+def _upsert_finding(
+    session: Session,
+    *,
+    run: RunRecord,
+    alert: AlertRecord,
+    seen_at: datetime,
+) -> None:
+    """Record the alert against its cross-run finding instead of adding a new finding."""
+    dialect = session.bind.dialect.name if session.bind is not None else ""
+    insert = (
+        postgresql_insert
+        if dialect == "postgresql"
+        else sqlite_insert
+        if dialect == "sqlite"
+        else None
+    )
+    if insert is None:
+        raise RuntimeError("Findings require PostgreSQL or SQLite")
+    statement = insert(FindingRecord).values(
+        id=str(uuid4()),
+        finding_key=alert.alert_key,
+        cve_id=alert.cve_id,
+        asset_key=alert.asset_key,
+        latest_alert_id=alert.id,
+        first_run_id=run.id,
+        last_run_id=run.id,
+        priority=alert.priority,
+        risk_score=alert.risk_score,
+        status="open",
+        occurrences=1,
+        first_seen_at=seen_at,
+        last_seen_at=seen_at,
+    )
+    session.execute(
+        statement.on_conflict_do_update(
+            index_elements=[FindingRecord.finding_key],
+            set_={
+                "latest_alert_id": statement.excluded.latest_alert_id,
+                "last_run_id": statement.excluded.last_run_id,
+                "priority": statement.excluded.priority,
+                "risk_score": statement.excluded.risk_score,
+                "last_seen_at": statement.excluded.last_seen_at,
+                "occurrences": FindingRecord.occurrences + 1,
+                # A resolved finding that is detected again is reopened; suppressed stays put.
+                "status": case(
+                    (FindingRecord.status == "resolved", "open"), else_=FindingRecord.status
+                ),
+            },
+        )
+    )
 
 
 def _enqueue_alert_delivery(

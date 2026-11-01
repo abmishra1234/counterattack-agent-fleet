@@ -260,6 +260,30 @@ class AlertRecord(Base):
     )
 
 
+class FindingRecord(Base):
+    """One advisory-asset finding across runs; alert rows stay as per-run history."""
+
+    __tablename__ = "findings"
+    __table_args__ = (
+        UniqueConstraint("finding_key", name="uq_finding_key"),
+        Index("ix_findings_status_last_seen", "status", "last_seen_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    finding_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    cve_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    asset_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    latest_alert_id: Mapped[str] = mapped_column(ForeignKey("alerts.id"), nullable=False)
+    first_run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False)
+    last_run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), nullable=False)
+    priority: Mapped[str] = mapped_column(String(8), nullable=False)
+    risk_score: Mapped[Decimal] = mapped_column(Numeric(8, 3), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="open")
+    occurrences: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ReviewCase(Base):
     __tablename__ = "review_cases"
     __table_args__ = (

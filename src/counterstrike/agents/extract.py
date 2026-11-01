@@ -10,7 +10,7 @@ import json
 import logging
 import time
 
-from pydantic import ValidationError
+from pydantic import ValidationError  # type: ignore
 
 from counterstrike.guards import detect_injection, extraction_is_grounded, wrap_untrusted
 from counterstrike.llm import LLMPort
