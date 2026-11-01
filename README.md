@@ -12,11 +12,31 @@ feed + KEV + inventory
 
 ## Run it
 
+Create and activate a project environment first. In Git Bash on Windows:
+
 ```bash
-pip install -e ".[dev]"
+python -m venv .venv
+source .venv/Scripts/activate
+```
+
+On Linux/macOS, activate with `source .venv/bin/activate`. In Windows PowerShell,
+use `.\.venv\Scripts\Activate.ps1`.
+
+```bash
+python -m pip install -e ".[dev]"
 python -m counterstrike run  --data data --out out          # offline, deterministic FakeLLM
 python -m counterstrike eval --out out                       # gate: exits 1 on any regression
-pytest --cov=counterstrike
+python -m pytest --cov=counterstrike --cov-report=term-missing --cov-fail-under=80
+```
+
+Use `python -m pytest` so tests run with the same Python used to install dependencies.
+If collection fails with `No module named 'apscheduler'`, the selected environment is
+missing a declared project dependency; activate `.venv` and repeat the install command.
+With an already provisioned environment, Git Bash can run the tests directly without
+activation:
+
+```bash
+.venv/Scripts/python.exe -m pytest --cov=counterstrike --cov-report=term-missing --cov-fail-under=80
 ```
 
 ## Local API and dashboard
