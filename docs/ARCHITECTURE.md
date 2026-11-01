@@ -6,11 +6,18 @@ This document describes the system at three levels, following the C4 model:
 2. **Containers**: the separately running parts of the system.
 3. **Components**: the main modules inside the worker and the API.
 
-A sequence diagram at the end follows one scheduled run from feed poll to owner alert.
+A sequence diagram follows one scheduled run from feed poll to owner alert, and the last section compares the manual process with the automated workflow.
 
 **Legend.** Solid arrows are active in the default configuration. Dashed arrows are implemented but **off by default** and enabled only by explicit settings and approvals (see [DELIVERY.md](DELIVERY.md) and `.env.example`). The diagrams reflect the code on 1 November 2026.
 
+**Images and sources.** Each diagram is shown as a PNG from [diagrams/](diagrams/), so it displays in any Markdown viewer. The Mermaid source sits under it in a collapsed "Mermaid source" section. After editing a source, regenerate its image, for example `npx -p @mermaid-js/mermaid-cli@11.4.2 mmdc -i diagram.mmd -o docs/diagrams/<name>.png -w 1800 -s 2 -b white`.
+
 ## 1. System context
+
+![System context diagram](diagrams/01-system-context.png)
+
+<details>
+<summary>Mermaid source</summary>
 
 ```mermaid
 flowchart TB
@@ -46,6 +53,8 @@ flowchart TB
     teams -.-> secteam
 ```
 
+</details>
+
 | External system | Used for | Default state |
 |---|---|---|
 | NVD | New and modified CVEs, CVSS, CPE version ranges, references | Off (`PUBLIC_FEEDS_ENABLED`); local fixtures used instead |
@@ -56,6 +65,11 @@ flowchart TB
 | SMTP / Teams | Owner and security alerts, daily digest | Off (`OUTBOX_DELIVERY_ENABLED`) |
 
 ## 2. Containers
+
+![Container diagram](diagrams/02-containers.png)
+
+<details>
+<summary>Mermaid source</summary>
 
 ```mermaid
 flowchart TB
@@ -90,6 +104,8 @@ flowchart TB
     cli -->|writes| out
 ```
 
+</details>
+
 | Container | Responsibility | Code |
 |---|---|---|
 | Dashboard | Overview, alerts, review queue, inventory, runs, sources, LLM usage, audit | `frontend/` |
@@ -106,6 +122,11 @@ flowchart TB
 ### 3a. Agent pipeline (inside the worker and the CLI)
 
 The pipeline is a fixed LangGraph state graph. Routing is code; the LLM is called only inside **Extract** (free-text bulletins) and **Remediate** (summary wording), and it can never set a match, score, priority, owner or fix.
+
+![Agent pipeline component diagram](diagrams/03a-agent-pipeline.png)
+
+<details>
+<summary>Mermaid source</summary>
 
 ```mermaid
 flowchart TB
@@ -129,6 +150,8 @@ flowchart TB
     human --> dispatch
 ```
 
+</details>
+
 Dotted arrows here show items routed to an analyst; they are not alerted.
 
 | Stage | Supporting modules | What they provide |
@@ -144,6 +167,11 @@ Dotted arrows here show items routed to an analyst; they are not alerted.
 After the graph finishes, the worker hands the final state to **repositories.py**, which saves everything in one transaction: advisories, inventory snapshot, matches, alerts, review cases, the run summary, audit events and outbox rows.
 
 ### 3b. API
+
+![API component diagram](diagrams/03b-api-components.png)
+
+<details>
+<summary>Mermaid source</summary>
 
 ```mermaid
 flowchart LR
@@ -183,7 +211,14 @@ flowchart LR
     art --> db
 ```
 
+</details>
+
 ## 4. One scheduled run, end to end
+
+![Sequence diagram of one scheduled run](diagrams/04-scheduled-run-sequence.png)
+
+<details>
+<summary>Mermaid source</summary>
 
 ```mermaid
 sequenceDiagram
@@ -212,4 +247,52 @@ sequenceDiagram
     O->>DB: Record delivery outcome + audit event
 ```
 
+</details>
+
 Steps 5 and 11 to 13 only happen when public feeds and outbox delivery are enabled. In the default configuration the pipeline reads the local fixtures and alerts stay in the outbox.
+
+## 5. Manual process vs automated workflow
+
+Orange steps are done by people today. Green steps are done by the agents. Blue is the only step left for an analyst, and only for uncertain matches. The manual lane is an assumption until the security team confirms it; see [PROCESS_IMPROVEMENT_PROPOSAL.md](PROCESS_IMPROVEMENT_PROPOSAL.md) for the baseline still to be collected.
+
+![Manual process vs automated workflow](diagrams/05-manual-vs-automated.png)
+
+<details>
+<summary>Mermaid source</summary>
+
+```mermaid
+flowchart TB
+    subgraph asis["AS-IS: manual process (assumed, to be confirmed with the security team)"]
+        direction LR
+        m1["<b>1 Discover</b><br/>Analyst reads NVD, KEV,<br/>vendor bulletins, mailing lists<br/><i>when time allows</i>"]
+        m2["<b>2 Identify relevance</b><br/>Search CMDB, ask app<br/>teams which versions run"]
+        m3["<b>3 Assess</b><br/>Mostly CVSS; exposure and<br/>criticality looked up by hand"]
+        m4["<b>4 Recommend</b><br/>Read the advisory for<br/>fixed version, workaround"]
+        m5["<b>5 Notify</b><br/>Email or ticket<br/>to the owning team"]
+        m1 --> m2 --> m3 --> m4 --> m5
+    end
+
+    subgraph tobe["TO-BE: Counterstrike agents fleet"]
+        direction LR
+        a1["<b>1 Ingest agent</b><br/>Polls NVD, KEV, OSV<br/>every 15 min; dedupes<br/>by CVE ID"]
+        a2["<b>2 Extract + Correlate</b><br/>Product and version ranges<br/>matched to inventory in code"]
+        a3["<b>3 Score</b><br/>CVSS + KEV + exposure +<br/>criticality → P1–P4 + SLA"]
+        a4["<b>4 Remediate</b><br/>Fix taken from source record;<br/>summary fact-checked"]
+        a5["<b>5 Dispatch</b><br/>Alert to owner by email/Teams;<br/>P1/P2 also to security"]
+        a1 --> a2 --> a3 --> a4 --> a5
+        rev[["Analyst reviews<br/>uncertain matches only"]]
+        a2 -.->|possible match| rev
+        rev -.->|decision| a5
+    end
+
+    asis ~~~ tobe
+
+    classDef manual fill:#fde7d9,stroke:#c2410c,color:#1f2937
+    classDef auto fill:#dcfce7,stroke:#15803d,color:#1f2937
+    classDef human fill:#dbeafe,stroke:#1d4ed8,color:#1f2937
+    class m1,m2,m3,m4,m5 manual
+    class a1,a2,a3,a4,a5 auto
+    class rev human
+```
+
+</details>

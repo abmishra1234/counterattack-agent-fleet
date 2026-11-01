@@ -45,6 +45,55 @@ If no data can be provided, the as-is column will stay labelled as an estimate f
 
 Every step writes an audit event, so each alert can be traced back to its source records, match decision, score and delivery.
 
+### Side-by-side view
+
+Orange steps are done by people today. Green steps are done by the agents. Blue is the only step left for an analyst, and only for uncertain matches.
+
+```mermaid
+flowchart TB
+    subgraph asis["AS-IS: manual process (assumed, to be confirmed with the security team)"]
+        direction LR
+        m1["<b>1 Discover</b><br/>Analyst reads NVD, KEV,<br/>vendor bulletins, mailing lists<br/><i>when time allows</i>"]
+        m2["<b>2 Identify relevance</b><br/>Search CMDB, ask app<br/>teams which versions run"]
+        m3["<b>3 Assess</b><br/>Mostly CVSS; exposure and<br/>criticality looked up by hand"]
+        m4["<b>4 Recommend</b><br/>Read the advisory for<br/>fixed version, workaround"]
+        m5["<b>5 Notify</b><br/>Email or ticket<br/>to the owning team"]
+        m1 --> m2 --> m3 --> m4 --> m5
+    end
+
+    subgraph tobe["TO-BE: Counterstrike agents fleet"]
+        direction LR
+        a1["<b>1 Ingest agent</b><br/>Polls NVD, KEV, OSV<br/>every 15 min; dedupes<br/>by CVE ID"]
+        a2["<b>2 Extract + Correlate</b><br/>Product and version ranges<br/>matched to inventory in code"]
+        a3["<b>3 Score</b><br/>CVSS + KEV + exposure +<br/>criticality → P1–P4 + SLA"]
+        a4["<b>4 Remediate</b><br/>Fix taken from source record;<br/>summary fact-checked"]
+        a5["<b>5 Dispatch</b><br/>Alert to owner by email/Teams;<br/>P1/P2 also to security"]
+        a1 --> a2 --> a3 --> a4 --> a5
+        rev[["Analyst reviews<br/>uncertain matches only"]]
+        a2 -.->|possible match| rev
+        rev -.->|decision| a5
+    end
+
+    asis ~~~ tobe
+
+    classDef manual fill:#fde7d9,stroke:#c2410c,color:#1f2937
+    classDef auto fill:#dcfce7,stroke:#15803d,color:#1f2937
+    classDef human fill:#dbeafe,stroke:#1d4ed8,color:#1f2937
+    class m1,m2,m3,m4,m5 manual
+    class a1,a2,a3,a4,a5 auto
+    class rev human
+```
+
+| | Manual (as-is, assumed) | Automated (to-be) |
+|---|---|---|
+| Trigger | Analyst availability | Schedule, every 15 minutes |
+| Finding affected assets | CMDB searches and questions to app teams | Version ranges matched against the inventory in code |
+| Prioritisation | Analyst judgement, mostly CVSS | Versioned policy: CVSS, KEV, exposure, criticality; same input gives the same priority |
+| Fix advice | Read by hand from the advisory | Taken from the source record; the LLM writes only the summary |
+| Analyst effort | Every advisory | Only uncertain matches (2 of 8 in the fixture run) |
+| Record of decisions | Scattered emails and tickets | Audit event for every step |
+| Time to awareness | *To collect* (section 2) | One polling cycle plus pipeline and delivery time; delivery not yet measured (T-09) |
+
 ## 4. Prototype measurements so far
 
 All values below were measured on the checked-in synthetic fixtures (8 advisories, 50 inventory assets) on 1 November 2026, with the offline FakeLLM. They show the prototype works end to end; they are not a production benchmark.
