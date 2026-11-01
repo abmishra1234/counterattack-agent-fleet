@@ -13,7 +13,7 @@ import re
 import time
 from typing import Any, Protocol
 
-import httpx
+import httpx # type: ignore
 
 from counterstrike.config import Settings, load_settings
 from counterstrike.db import get_session_factory
